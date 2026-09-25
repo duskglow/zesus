@@ -41,7 +41,7 @@ from ..zfs.constants import ChecksumType, Compression, DmuType
 from ..zfs.dnode import Dnode, parse_dnode
 from ..zfs.objset import Objset
 from ..zfs.pool import Pool
-from ..zfs.reader import BlockRead
+from ..zfs.reader import BlockRead, ReadStatus
 from ..zfs.zap import parse_micro, read_zap
 
 log = logging.getLogger(__name__)
@@ -187,22 +187,36 @@ class VolumeReconstructor:
                 log.info("  read %d/%d indirect blocks (%.0f/s)", i, len(order), i / (time.monotonic() - t0))
         return out
 
-    def carved_at_level(self, level: int) -> list[BlockPointer]:
-        """Carved indirect blocks for ZVOL data at *level* (children at level-1), as
-        synthetic BPs whose checksum is computed from the block as found."""
+    def carved_at_level(self, level: int) -> list[tuple[BlockPointer, BlockRead]]:
+        """Carved indirect blocks for ZVOL data at *level* (children at level-1).
+
+        Each comes back as a synthetic BP (checksum computed from the block as found, since
+        no parent vouches for it) together with its decompressed contents. Blocks are read
+        once, in physical order.
+        """
+        import lz4.block
+
         from ..zfs.checksum import fletcher4
-        bps = []
+        out = []
         for row in self.db.execute(
                 "SELECT dva_offset, vdev_top, phys, psize_hint, lsize, max_birth FROM carved WHERE pool_id=? "
                 "AND kind='indirect' AND child_type=? AND child_level=? AND max_birth < ? ORDER BY phys",
                 (self.pool_id, DmuType.ZVOL, level - 1, self.destroy_txg)):
+            if (row["vdev_top"], row["dva_offset"]) in self._carved_by_loc:
+                continue
             raw = self._read_phys(row["phys"], row["psize_hint"])
-            bps.append(blkptr.build(
+            try:
+                clen = struct.unpack_from(">I", raw, 0)[0]
+                data = lz4.block.decompress(raw[4:4 + clen], uncompressed_size=row["lsize"])
+            except Exception:
+                continue
+            bp = blkptr.build(
                 vdev=row["vdev_top"], offset=row["dva_offset"], asize=row["psize_hint"],
                 psize=row["psize_hint"], lsize=row["lsize"], comp=Compression.LZ4,
                 cksum_type=ChecksumType.FLETCHER_4, type=DmuType.ZVOL, level=level,
-                birth=row["max_birth"], cksum=fletcher4(raw)))
-        return bps
+                birth=row["max_birth"], cksum=fletcher4(raw))
+            out.append((bp, BlockRead(ReadStatus.OK, data)))
+        return out
 
     # ------------------------------------------------------------------ main
     def build(self, roots: list[Root], limit_blocks: int | None = None) -> tuple[dict[int, list[Cand]], Root]:
@@ -250,11 +264,8 @@ class VolumeReconstructor:
                             if not child.is_hole and not child.embedded:
                                 index[(s, child.dvas[0].vdev, child.dvas[0].offset)] = pos
             placed = unplaced = ambiguous = 0
-            for bp in self.carved_at_level(level):
+            for bp, rd in self.carved_at_level(level):
                 if (bp.dvas[0].vdev, bp.dvas[0].offset) in known_locs:
-                    continue
-                rd = self.r.read(bp)
-                if not rd.data:
                     continue
                 votes = defaultdict(int)
                 for s, child in enumerate(blkptr.parse_array(rd.data)):

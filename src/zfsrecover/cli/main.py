@@ -39,6 +39,9 @@ def add_scan_args(p: argparse.ArgumentParser) -> None:
     p.add_argument("--carve-end", type=_size, default=None, help="carve up to this DVA offset")
     p.add_argument("--limit-blocks", type=int, default=None,
                    help="(testing) only reconstruct the first N logical blocks of each volume")
+    p.add_argument("--ignore-ring", action="store_true",
+                   help="(validation) reconstruct volumes from carved blocks only, as if every "
+                        "uberblock had lost track of them")
     p.add_argument("--progress-interval", type=float, default=30, help="seconds between progress lines")
 
 
@@ -57,7 +60,7 @@ def cmd_scan(args: argparse.Namespace) -> int:
     stop.install()
     ctx = pipeline.ScanContext(db=db, source=src, stop=stop, options={
         "chunk_size": args.chunk_size, "carve_start": args.carve_start, "carve_end": args.carve_end,
-        "progress_interval": args.progress_interval, "limit_blocks": args.limit_blocks,
+        "progress_interval": args.progress_interval, "limit_blocks": args.limit_blocks, "ignore_ring": args.ignore_ring,
         "redo": {x for x in args.redo.split(",") if x}})
     for name in ctx.options["redo"]:
         db.reset_phase(name)

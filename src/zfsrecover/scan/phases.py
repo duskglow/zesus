@@ -201,60 +201,129 @@ def phase_carve(ctx: ScanContext) -> bool:
 @phase("reconstruct")
 def phase_reconstruct(ctx: ScanContext) -> bool:
     """Rebuild the block map of every volume (live, historical or destroyed) by merging
-    all surviving generations of its block tree."""
+    all surviving generations of its block tree.
+
+    Volumes known from the DSL use their ring roots plus matching carved roots. Carved
+    zvol roots that match no known volume are grouped by geometry into *carved volumes*.
+    This is how a volume that has completely fallen off the uberblock ring is found. Each
+    one is matched to a destroyed dataset from the history log where possible.
+    """
+    from collections import defaultdict
+
     from ..carve.reconstruct import VolumeReconstructor
-    from ..carve.verify import summarize
 
     limit = ctx.options.get("limit_blocks")
+    ignore_ring = bool(ctx.options.get("ignore_ring"))
     carve_done = ctx.db.is_done("carve")
     if not carve_done:
         log.warning("carving has not completed: reconstruction will use only the tree versions "
                     "reachable from the uberblock ring (re-run 'reconstruct' after 'carve')")
+    if ignore_ring:
+        log.warning("--ignore-ring: pretending no uberblock can reach any volume (carved roots only)")
     for pool in ctx.pools:
         pid = ctx.pool_ids[pool.guid]
-        vols = ctx.db.execute("SELECT * FROM datasets WHERE pool_id=? AND kind='volume'", (pid,)).fetchall()
-        for ds in vols:
-            ds = dict(ds)
+        with ctx.db.tx():
+            for vid, in ctx.db.execute("SELECT v.id FROM volumes v JOIN datasets d ON v.dataset_id=d.id "
+                                       "WHERE d.pool_id=?", (pid,)).fetchall():
+                _drop_volume(ctx, vid)
+            ctx.db.execute("DELETE FROM datasets WHERE pool_id=? AND origin='carved'", (pid,))
+        known_geoms: set = set()
+        if not ignore_ring:
+            for ds in ctx.db.execute("SELECT * FROM datasets WHERE pool_id=? AND kind='volume'", (pid,)).fetchall():
+                ds = dict(ds)
+                rec = VolumeReconstructor(pool, ctx.db, pid, ds)
+                roots = rec.roots_from_rings()
+                if not roots:
+                    log.warning("volume %s: no ring root readable; it will be handled with carved roots", ds["name"])
+                    continue
+                geom = roots[0].geometry
+                known_geoms.add(geom)
+                carved = rec.roots_from_carving(geom)
+                _reconstruct_one(ctx, rec, ds, roots + carved, len(carved), limit)
+
+        # ---- carved-only volumes
+        probe = VolumeReconstructor(pool, ctx.db, pid, {"id": None, "name": "?", "destroy_txg": None})
+        groups: dict[tuple, list] = defaultdict(list)
+        for r in probe.roots_from_carving(None):
+            if r.geometry not in known_geoms:
+                groups[r.geometry].append(r)
+        for n, (geom, roots) in enumerate(sorted(groups.items(), key=lambda kv: -len(kv[1]))):
+            _nlevels, maxblkid, dblksz, _ = geom
+            volsize = next((r.volsize for r in roots if r.volsize), None) or (maxblkid + 1) * dblksz
+            lo, hi = min(r.txg for r in roots), max(r.txg for r in roots)
+            match = _match_history(ctx, pid, lo, hi, volsize)
+            name = match["name"] if match else f"carved-zvol-{n + 1}"
+            log.info("carved volume group %d: %d root(s), txg %d..%d, volsize %d, blocksize %d -> %s%s",
+                     n + 1, len(roots), lo, hi, volsize, dblksz, name,
+                     f" (matched history dsobj {match['dsobj']})" if match else " (no history match)")
             with ctx.db.tx():
-                for vid, in ctx.db.execute("SELECT id FROM volumes WHERE dataset_id=?", (ds["id"],)).fetchall():
-                    for t in ("volume_spans", "volume_coverage", "volume_roots"):
-                        ctx.db.execute(f"DELETE FROM {t} WHERE volume_id=?", (vid,))
-                    ctx.db.execute("DELETE FROM volumes WHERE id=?", (vid,))
+                dsid = ctx.db.insert("datasets", {
+                    "pool_id": pid, "dsobj": match["dsobj"] if match else None, "name": name, "kind": "volume",
+                    "origin": "carved", "status": "destroyed" if match else "unknown",
+                    "creation_txg": match["creation_txg"] if match else None,
+                    "destroy_txg": match["destroy_txg"] if match else None,
+                    "destroy_time": match["destroy_time"] if match else None,
+                    "props_json": j({"size": volsize, "volblocksize": dblksz}),
+                    "notes": "reconstructed from carved blocks only"
+                             + ("; name inferred from pool history by txg window and size" if match else "")})
+            ds = dict(ctx.db.execute("SELECT * FROM datasets WHERE id=?", (dsid,)).fetchone())
             rec = VolumeReconstructor(pool, ctx.db, pid, ds)
-            roots = rec.roots_from_rings()
-            geom = roots[0].geometry if roots else None
-            carved_roots = rec.roots_from_carving(geom)
-            if not geom and carved_roots:
-                geom = carved_roots[0].geometry
-                carved_roots = [r for r in carved_roots if r.geometry == geom]
-            roots += carved_roots
-            if not roots:
-                log.warning("volume %s: no readable tree version found", ds["name"])
-                ctx.db.event("warning", "reconstruct", f"no tree for {ds['name']}")
-                continue
-            log.info("volume %s: %d tree versions (%d from ring, %d carved); newest txg %d",
-                     ds["name"], len(roots), len(roots) - len(carved_roots), len(carved_roots),
-                     max(r.txg for r in roots))
-            spans, ref = rec.build(roots, limit_blocks=limit)
-            props = json.loads(ds["props_json"] or "{}")
-            volsize = ref.volsize or props.get("size")
-            n_blocks = rec.maxblkid + 1
-            with ctx.db.tx():
-                vid = ctx.db.insert("volumes", {
-                    "dataset_id": ds["id"], "name": ds["name"], "volsize": volsize,
-                    "volblocksize": ref.dnode.datablksz, "nlevels": ref.dnode.nlevels,
-                    "root_txg": max(r.txg for r in roots), "n_blocks": n_blocks, "status": "mapped",
-                    "notes": j({"stats": rec.stats.__dict__, "limit_blocks": limit})})
-                for r in roots:
-                    ctx.db.insert("volume_roots", {"volume_id": vid, "txg": r.txg, "top_bp": r.top_bp.raw,
-                                                   "provenance": r.provenance, "usable": 1})
-                for span, first, count, blob, choice, status, mb in rec.choose(spans, ref):
-                    ctx.db.execute("INSERT INTO volume_spans(volume_id,span,first_blkid,count,candidates,choice,"
-                                   "status,max_birth) VALUES(?,?,?,?,?,?,?,?)",
-                                   (vid, span, first, count, blob, choice, status, mb))
-            summary = summarize(ctx.db, vid)
-            log.info("volume %s mapped: %s", ds["name"], summary)
+            _reconstruct_one(ctx, rec, ds, roots, len(roots), limit)
     return carve_done and not limit
+
+
+def _drop_volume(ctx: ScanContext, vid: int) -> None:
+    for fid, in ctx.db.execute("SELECT id FROM filesystems WHERE volume_id=?", (vid,)).fetchall():
+        ctx.db.execute("DELETE FROM fs_extents WHERE entry_id IN (SELECT id FROM fs_entries WHERE fs_id=?)", (fid,))
+        ctx.db.execute("DELETE FROM fs_entries WHERE fs_id=?", (fid,))
+    for t in ("filesystems", "partitions", "volume_spans", "volume_coverage", "volume_roots"):
+        ctx.db.execute(f"DELETE FROM {t} WHERE volume_id=?", (vid,))
+    ctx.db.execute("DELETE FROM volumes WHERE id=?", (vid,))
+    ctx.db.execute("DELETE FROM progress WHERE phase='contents' AND unit=?", (f"volume:{vid}",))
+
+
+def _match_history(ctx: ScanContext, pid: int, lo: int, hi: int, volsize: int) -> dict | None:
+    """Find the destroyed dataset whose lifetime contains [lo, hi]. Prefer one whose
+    creation ioctl recorded the same volsize."""
+    cands = [dict(r) for r in ctx.db.execute(
+        "SELECT * FROM datasets WHERE pool_id=? AND origin='history_log' AND status='destroyed' "
+        "AND (creation_txg IS NULL OR creation_txg <= ?) AND destroy_txg > ?", (pid, lo, hi))]
+    if not cands:
+        return None
+    sizes = set()
+    for (fields,) in ctx.db.execute("SELECT fields_json FROM history_records WHERE pool_id=? AND kind='ioctl'", (pid,)):
+        try:
+            vs = json.loads(fields).get("in_nvl", {}).get("props", {}).get("volsize")
+            if vs:
+                sizes.add(int(vs))
+        except Exception:
+            continue
+    if len(cands) == 1 or volsize in sizes:
+        return max(cands, key=lambda c: c["creation_txg"] or 0)
+    return None
+
+
+def _reconstruct_one(ctx: ScanContext, rec, ds: dict, roots: list, n_carved: int, limit) -> None:
+    from ..carve.verify import summarize
+    log.info("volume %s: %d tree versions (%d from ring, %d carved); newest txg %d",
+             ds["name"], len(roots), len(roots) - n_carved, n_carved, max(r.txg for r in roots))
+    spans, ref = rec.build(roots, limit_blocks=limit)
+    props = json.loads(ds.get("props_json") or "{}")
+    volsize = ref.volsize or props.get("size")
+    with ctx.db.tx():
+        vid = ctx.db.insert("volumes", {
+            "dataset_id": ds["id"], "name": ds["name"], "volsize": volsize,
+            "volblocksize": ref.dnode.datablksz, "nlevels": ref.dnode.nlevels,
+            "root_txg": max(r.txg for r in roots), "n_blocks": rec.maxblkid + 1, "status": "mapped",
+            "notes": j({"stats": rec.stats.__dict__, "limit_blocks": limit})})
+        for r in roots:
+            ctx.db.insert("volume_roots", {"volume_id": vid, "txg": r.txg, "top_bp": r.top_bp.raw,
+                                           "provenance": r.provenance, "usable": 1})
+        for span, first, count, blob, choice, status, mb in rec.choose(spans, ref):
+            ctx.db.execute("INSERT INTO volume_spans(volume_id,span,first_blkid,count,candidates,choice,"
+                           "status,max_birth) VALUES(?,?,?,?,?,?,?,?)",
+                           (vid, span, first, count, blob, choice, status, mb))
+    log.info("volume %s mapped: %s", ds["name"], summarize(ctx.db, vid))
 
 
 @phase("verify")
