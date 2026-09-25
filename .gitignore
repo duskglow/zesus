@@ -16,3 +16,4 @@ dist/
 /out/
 /work/
 /dev/testimage.toml
+.claude/

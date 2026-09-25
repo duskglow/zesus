@@ -1,0 +1,235 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ZFS Forensic Recovery</title>
+<style>
+:root {
+  --bg: #f7f7f5; --panel: #ffffff; --text: #1d1f21; --muted: #6b7075; --border: #e2e2de;
+  --accent: #2f6fdb; --ok: #2e9d57; --stale: #84b84a; --hole: #d9dcd6; --warn: #d8911c; --bad: #d23f3f;
+  --unknown: #9aa3ad; --mono: ui-monospace, SFMono-Regular, Consolas, monospace;
+}
+@media (prefers-color-scheme: dark) {
+  :root { --bg: #15171a; --panel: #1d2024; --text: #e6e6e3; --muted: #9aa0a6; --border: #2d3136;
+          --accent: #6ea0ff; --hole: #3a3f45; }
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--bg); color: var(--text); font: 14px/1.45 system-ui, sans-serif; }
+header { display: flex; align-items: baseline; gap: 16px; padding: 14px 20px; border-bottom: 1px solid var(--border);
+         background: var(--panel); position: sticky; top: 0; z-index: 2; flex-wrap: wrap; }
+header h1 { font-size: 16px; margin: 0; }
+header .src { color: var(--muted); font: 12px var(--mono); overflow-wrap: anywhere; }
+nav { display: flex; gap: 4px; margin-left: auto; }
+nav button { background: none; border: 1px solid transparent; color: var(--muted); padding: 5px 10px; border-radius: 6px;
+             cursor: pointer; font: inherit; }
+nav button.active { color: var(--text); border-color: var(--border); background: var(--bg); }
+main { padding: 20px; max-width: 1300px; margin: 0 auto; }
+section { display: none; } section.active { display: block; }
+.card { background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 16px; margin-bottom: 16px; }
+.card h2 { font-size: 15px; margin: 0 0 10px; }
+.grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: 12px; }
+.stat { border: 1px solid var(--border); border-radius: 8px; padding: 10px 12px; }
+.stat .v { font-size: 20px; font-weight: 600; font-variant-numeric: tabular-nums; }
+.stat .l { color: var(--muted); font-size: 12px; }
+table { width: 100%; border-collapse: collapse; font-variant-numeric: tabular-nums; }
+th, td { text-align: left; padding: 6px 8px; border-bottom: 1px solid var(--border); vertical-align: top; }
+th { color: var(--muted); font-weight: 500; font-size: 12px; }
+td.num, th.num { text-align: right; }
+.tablewrap { overflow-x: auto; }
+.badge { display: inline-block; padding: 1px 8px; border-radius: 999px; font-size: 12px; color: #fff; }
+.b-full, .b-ok, .b-present, .b-verified, .b-done, .b-inventoried { background: var(--ok); }
+.b-running, .b-queued, .b-mapped { background: var(--accent); } .b-failed { background: var(--bad); } .b-partial, .b-ok_stale { background: var(--warn); }
+.b-none, .b-destroyed, .b-cksum_mismatch, .b-no_metadata, .b-zeroed { background: var(--bad); }
+.b-na, .b-hole, .b-unknown { background: var(--unknown); }
+.mono { font-family: var(--mono); font-size: 12px; }
+.muted { color: var(--muted); }
+canvas { width: 100%; height: 90px; border-radius: 6px; display: block; background: var(--hole); }
+.legend { display: flex; gap: 14px; flex-wrap: wrap; font-size: 12px; margin-top: 8px; color: var(--muted); }
+.legend i { display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin-right: 5px; vertical-align: -1px; }
+.crumbs a, a { color: var(--accent); text-decoration: none; cursor: pointer; }
+input, select { font: inherit; padding: 6px 8px; border: 1px solid var(--border); border-radius: 6px; background: var(--bg);
+                color: var(--text); }
+button.primary { background: var(--accent); color: #fff; border: 0; padding: 7px 12px; border-radius: 6px; cursor: pointer; font: inherit; }
+.row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-bottom: 10px; }
+.empty { color: var(--muted); padding: 20px 0; text-align: center; }
+@media (max-width: 640px) { main { padding: 12px; } nav { margin-left: 0; width: 100%; overflow-x: auto; } }
+</style>
+</head>
+<body>
+<header>
+  <h1>ZFS Forensic Recovery</h1>
+  <span class="src" id="src"></span>
+  <nav>
+    <button data-tab="overview" class="active">Overview</button>
+    <button data-tab="volumes">Volumes</button>
+    <button data-tab="files">Files</button>
+    <button data-tab="jobs">Extraction</button>
+    <button data-tab="events">Log</button>
+  </nav>
+</header>
+<main>
+  <section id="overview" class="active"></section>
+  <section id="volumes"></section>
+  <section id="files">
+    <div class="card">
+      <div class="row">
+        <select id="fsSel"></select>
+        <input id="q" placeholder="Search paths…" size="28">
+        <select id="st"><option value="">any status</option><option>full</option><option>partial</option><option>none</option></select>
+        <button class="primary" id="searchBtn">Search</button>
+      </div>
+      <div class="crumbs mono" id="crumbs"></div>
+      <div class="tablewrap"><table id="listing"></table></div>
+    </div>
+  </section>
+  <section id="jobs"></section>
+  <section id="events"></section>
+</main>
+<script>
+const $ = s => document.querySelector(s);
+const esc = s => String(s ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+const api = async (p, opt) => { const r = await fetch(p, opt); if (!r.ok) throw new Error(await r.text()); return r.json(); };
+const gib = n => n == null ? "?" : n >= 2**30 ? (n/2**30).toFixed(1)+" GiB" : n >= 2**20 ? (n/2**20).toFixed(1)+" MiB" : n >= 1024 ? (n/1024).toFixed(1)+" KiB" : n+" B";
+const ts = t => t ? new Date(t*1000).toLocaleString() : "?";
+const pct = (a, n) => n ? (100*a/n).toFixed(2)+"%" : "–";
+const badge = s => `<span class="badge b-${esc((s||"na").replace("/",""))}">${esc(s||"n/a")}</span>`;
+const COLORS = {ok:"--ok", ok_stale:"--stale", embedded:"--ok", hole:"--hole", discarded:"--hole", unknown:"--unknown",
+                cksum_mismatch:"--bad", zeroed:"--warn", no_metadata:"--bad", unreadable:"--bad", decompress_fail:"--bad"};
+const css = v => getComputedStyle(document.documentElement).getPropertyValue(v).trim();
+let OV = null, curFs = null;
+
+document.querySelectorAll("nav button").forEach(b => b.onclick = () => {
+  document.querySelectorAll("nav button, section").forEach(x => x.classList.remove("active"));
+  b.classList.add("active"); $("#" + b.dataset.tab).classList.add("active");
+  if (b.dataset.tab === "jobs") renderJobs();
+  if (b.dataset.tab === "events") renderEvents();
+});
+
+async function load() {
+  OV = await api("/api/overview");
+  $("#src").textContent = `${OV.source || "(no source: browse only)"} · ${OV.map}`;
+  renderOverview(); renderVolumes(); initFiles();
+}
+
+function renderOverview() {
+  const h = [];
+  for (const p of OV.pools) {
+    const ok = p.uberblocks.filter(u => u.checksum_ok).length;
+    const mos = p.uberblocks.filter(u => u.mos_ok).length;
+    h.push(`<div class="card"><h2>Pool ${esc(p.name)}</h2><div class="grid">
+      <div class="stat"><div class="v">${esc(p.state)}</div><div class="l">state · host ${esc(p.hostname)}</div></div>
+      <div class="stat"><div class="v">${p.txg}</div><div class="l">last txg · ashift ${p.ashift}</div></div>
+      <div class="stat"><div class="v">${ok}/${p.uberblocks.length}</div><div class="l">valid uberblocks · ${mos} with readable MOS</div></div>
+      <div class="stat"><div class="v">${Object.values(p.carved).reduce((a,b)=>a+b,0)}</div><div class="l">carved metadata blocks</div></div>
+    </div></div>`);
+  }
+  h.push(`<div class="card"><h2>Datasets</h2><div class="tablewrap"><table><tr><th>Name</th><th>Kind</th><th>Status</th><th>Found via</th><th>Created</th><th>Destroyed</th></tr>`);
+  for (const d of OV.datasets) h.push(`<tr><td class="mono">${esc(d.name)}</td><td>${esc(d.kind)}</td><td>${badge(d.status)}</td><td>${esc(d.origin)}</td>
+    <td>txg ${d.creation_txg ?? "?"}<br><span class="muted">${ts(d.creation_time)}</span></td>
+    <td>${d.destroy_txg ? `txg ${d.destroy_txg}<br><span class="muted">${ts(d.destroy_time)}</span>` : ""}</td></tr>`);
+  h.push(`</table></div></div>`);
+  h.push(`<div class="card"><h2>Scan progress</h2>${OV.progress.map(p => `<span class="badge b-ok">${esc(p.phase)}</span> <span class="muted">${p.n} unit(s), ${esc(p.last)}</span>`).join("<br>") || '<div class="empty">no phases complete</div>'}</div>`);
+  $("#overview").innerHTML = h.join("");
+}
+
+async function renderVolumes() {
+  const el = $("#volumes");
+  if (!OV.volumes.length) { el.innerHTML = '<div class="card empty">No volumes reconstructed yet.</div>'; return; }
+  el.innerHTML = OV.volumes.map(v => {
+    const n = v.n_blocks || 0;
+    const parts = OV.partitions.filter(p => p.volume_id === v.id);
+    const fss = OV.filesystems.filter(f => f.volume_id === v.id);
+    return `<div class="card"><h2>${esc(v.name)} ${badge(v.status)}</h2><div class="grid">
+      <div class="stat"><div class="v">${gib(v.volsize)}</div><div class="l">volsize · ${v.volblocksize/1024} KiB blocks</div></div>
+      <div class="stat"><div class="v">${pct(v.n_verified, n)}</div><div class="l">verified (${v.n_verified})</div></div>
+      <div class="stat"><div class="v">${pct(v.n_holes, n)}</div><div class="l">never written</div></div>
+      <div class="stat"><div class="v">${v.n_stale ?? 0}</div><div class="l">from older generation</div></div>
+      <div class="stat"><div class="v" style="color:var(--bad)">${(v.n_missing||0)+(v.n_damaged||0)}</div><div class="l">blocks lost</div></div>
+    </div>
+    <p class="muted">Block map, left to right across the volume:</p><canvas id="cov${v.id}" width="1200" height="90"></canvas>
+    <div class="legend">${[["ok","recovered"],["ok_stale","older generation"],["hole","never written"],["zeroed","trimmed"],["cksum_mismatch","overwritten / no metadata"]]
+      .map(([k,l]) => `<span><i style="background:var(${COLORS[k]})"></i>${l}</span>`).join("")}</div>
+    ${parts.length ? `<h2 style="margin-top:16px">Partitions</h2><table><tr><th>#</th><th>Type</th><th class="num">Start</th><th class="num">Size</th><th class="num">Recoverable</th><th></th></tr>
+      ${parts.map(p => `<tr><td>${p.idx}</td><td>${esc(p.type_name)} ${esc(p.name||"")}</td><td class="num mono">${p.start.toString(16)}</td>
+      <td class="num">${gib(p.length)}</td><td class="num">${(100*(p.coverage||0)).toFixed(3)}%</td>
+      <td><a onclick="queue({kind:'partition',partition_id:${p.id}})">extract image</a></td></tr>`).join("")}</table>` : ""}
+    ${fss.map(f => `<p>Filesystem <b>${esc(f.fstype)}</b> ${esc(f.label||"")} <span class="mono muted">${esc(f.uuid||"")}</span> — ${esc(f.state)}</p>`).join("")}
+    <p><a onclick="queue({kind:'volume',volume_id:${v.id}})">Extract whole volume image</a></p></div>`;
+  }).join("");
+  for (const v of OV.volumes) drawCoverage(v.id);
+}
+
+async function drawCoverage(id) {
+  const c = document.getElementById("cov" + id); if (!c) return;
+  const d = await api(`/api/volumes/${id}/coverage?buckets=${c.width}`);
+  const g = c.getContext("2d"); const w = c.width / d.buckets.length;
+  d.buckets.forEach((b, i) => {
+    let y = 0; const tot = Object.values(b).reduce((a, x) => a + x, 0) || 1;
+    for (const k of d.legend) { const h = c.height * (b[k] || 0) / tot; if (!h) continue;
+      g.fillStyle = css(COLORS[k] || "--unknown"); g.fillRect(i * w, y, Math.ceil(w), h); y += h; }
+  });
+}
+
+function initFiles() {
+  const inv = OV.filesystems.filter(f => f.plugin);
+  $("#fsSel").innerHTML = inv.map(f => `<option value="${f.id}">${f.id}: ${esc(f.fstype)} ${esc(f.label||f.uuid||"")}</option>`).join("");
+  if (inv.length) { curFs = inv[0].id; browse("/"); } else $("#listing").innerHTML = '<tr><td class="empty">No inventoried filesystem yet.</td></tr>';
+  $("#fsSel").onchange = e => { curFs = +e.target.value; browse("/"); };
+  $("#searchBtn").onclick = search;
+  $("#q").onkeydown = e => { if (e.key === "Enter") search(); };
+}
+
+function rowsHtml(list, showPath) {
+  if (!list.length) return '<tr><td class="empty">Empty.</td></tr>';
+  return `<tr><th>Name</th><th class="num">Size</th><th>Modified</th><th>Status</th><th></th></tr>` + list.map(e =>
+    `<tr><td class="mono">${e.type === "dir" ? `<a onclick="browse('${esc(e.path).replace(/'/g,"\\'")}')">${esc(showPath ? e.path : e.name)}/</a>` : esc(showPath ? e.path : e.name)}
+      ${e.link_target ? `<span class="muted"> → ${esc(e.link_target)}</span>` : ""}${e.deleted ? ' <span class="badge b-none">deleted</span>' : ""}</td>
+     <td class="num">${e.type === "file" ? gib(e.size) : ""}</td><td class="muted">${ts(e.mtime)}</td><td>${badge(e.status)}</td>
+     <td><a onclick="queue({kind:'files',fs_id:${curFs},paths:['${esc(e.path).replace(/'/g,"\\'")}']})">extract</a></td></tr>`).join("");
+}
+
+async function browse(path) {
+  const d = await api(`/api/fs/${curFs}/ls?path=${encodeURIComponent(path)}`);
+  const segs = path.split("/").filter(Boolean); let acc = "";
+  $("#crumbs").innerHTML = `<a onclick="browse('/')">/</a>` + segs.map(s => { acc += "/" + s;
+    return ` <a onclick="browse('${esc(acc).replace(/'/g,"\\'")}')">${esc(s)}</a> /`; }).join("");
+  $("#listing").innerHTML = rowsHtml(d.children, false);
+}
+
+async function search() {
+  const q = $("#q").value, st = $("#st").value;
+  const d = await api(`/api/fs/${curFs}/search?q=${encodeURIComponent(q)}&status=${st}`);
+  $("#crumbs").textContent = `${d.length} result(s)`;
+  $("#listing").innerHTML = rowsHtml(d, true);
+}
+
+async function queue(req) {
+  if (!OV.source) { alert("Start the web UI with --source to enable extraction."); return; }
+  const out = prompt("Output directory (must not be on the evidence):", localStorage.getItem("zfr-out") || "");
+  if (!out) return;
+  try { localStorage.setItem("zfr-out", out); } catch (e) {}
+  req.out = out;
+  try { await api("/api/extract", {method: "POST", headers: {"content-type": "application/json"}, body: JSON.stringify(req)}); }
+  catch (e) { alert(e.message); return; }
+  document.querySelector('nav button[data-tab="jobs"]').click();
+}
+
+async function renderJobs() {
+  const j = await api("/api/jobs");
+  $("#jobs").innerHTML = `<div class="card"><h2>Extraction jobs</h2>${j.length ? `<table><tr><th>ID</th><th>What</th><th>State</th><th>Result</th></tr>
+    ${j.map(x => `<tr><td class="mono">${x.id}</td><td class="mono">${esc(JSON.stringify(x.request))}</td><td>${badge(x.state)}</td>
+    <td>${esc(x.message)}${(x.outputs||[]).slice(0,20).map(o => `<div class="mono">${badge(o.status)} ${esc(o.path)} ${o.lost_bytes ? "(" + gib(o.lost_bytes) + " lost)" : ""}</div>`).join("")}</td></tr>`).join("")}</table>`
+    : '<div class="empty">No jobs yet. Use the "extract" links in Volumes or Files.</div>'}</div>`;
+  if (j.some(x => x.state === "running" || x.state === "queued")) setTimeout(() => { if ($("#jobs").classList.contains("active")) renderJobs(); }, 2000);
+}
+
+async function renderEvents() {
+  const ev = await api("/api/events");
+  $("#events").innerHTML = `<div class="card"><h2>Findings log</h2><table>${ev.map(e => `<tr><td class="muted mono">${esc(e.ts)}</td><td>${esc(e.level)}</td><td>${esc(e.component)}</td><td>${esc(e.message)} <span class="mono muted">${esc(e.context||"")}</span></td></tr>`).join("") || '<tr><td class="empty">No events.</td></tr>'}</table></div>`;
+}
+
+load().catch(e => { $("#overview").innerHTML = `<div class="card">Failed to load: ${esc(e.message)}</div>`; });
+</script>
+</body>
+</html>

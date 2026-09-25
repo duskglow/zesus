@@ -82,6 +82,16 @@ def cmd_info(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_web(args: argparse.Namespace) -> int:
+    logsetup.setup(args.verbose, args.log)
+    try:
+        from ..web.app import serve
+    except ImportError as exc:
+        raise SystemExit(f"web UI needs extra packages: pip install 'zfs-forensic-recovery[web]' ({exc})") from exc
+    serve(args.map, args.source, args.host, args.port)
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="zfsrecover", description="ZFS forensic scanner and extractor")
     p.add_argument("--version", action="version", version=__version__)
@@ -97,6 +107,12 @@ def build_parser() -> argparse.ArgumentParser:
     i.set_defaults(func=cmd_info)
     from .extract_cmd import add_extract_parser
     add_extract_parser(sub)
+    wb = sub.add_parser("web", help="browse a map in a local web UI (needs the [web] extra)")
+    wb.add_argument("map")
+    wb.add_argument("--source", help="image/device, to enable extraction from the UI")
+    wb.add_argument("--host", default="127.0.0.1")
+    wb.add_argument("--port", type=int, default=8765)
+    wb.set_defaults(func=cmd_web)
     return p
 
 
