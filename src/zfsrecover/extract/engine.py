@@ -49,6 +49,7 @@ class Options:
     force: bool = False
     partial_suffix: str | None = None   # e.g. ".PARTIAL"
     sparse: bool = True
+    hash_outputs: bool = True
 
 
 @dataclass
@@ -181,20 +182,33 @@ class Extractor:
                 if time.monotonic() - last_log > 30:
                     last_log = time.monotonic()
                     log.info("  %.1f%% (%.0f MB/s)", 100 * done / max(1, total), done / (last_log - t0) / 1e6)
-            # holes, embedded blocks, and anything not in the physical work list
-            for blkid in range(lo, hi):
-                if written[blkid - lo]:
-                    continue
-                st = lv.block_status(blkid)
+            # Everything the physical pass did not write, driven by the run-length coverage
+            # table: holes stay sparse, lost runs become gaps in one step, and only
+            # recoverable-but-unwritten blocks (embedded, fallbacks) are visited one by one.
+            runs = self.db.execute(
+                "SELECT first_blkid, count, status FROM volume_coverage WHERE volume_id=? AND "
+                "first_blkid < ? AND first_blkid + count > ? ORDER BY first_blkid", (volume_id, hi, lo)).fetchall()
+            covered_to = lo
+            for r in runs:
+                a_blk, b_blk = max(lo, r["first_blkid"]), min(hi, r["first_blkid"] + r["count"])
+                if a_blk > covered_to:                   # no coverage row at all: no metadata
+                    self._gap_blocks(rec, covered_to, a_blk, bs, start, end, BlockStatus.NO_METADATA)
+                covered_to = max(covered_to, b_blk)
+                st = BlockStatus[r["status"].upper()]
                 if st in (BlockStatus.HOLE, BlockStatus.DISCARDED):
                     continue
-                data, st2 = lv.read_block(blkid) if st in RECOVERED or st == BlockStatus.UNKNOWN else (None, st)
-                if data is not None:
-                    self._write_block(f, blkid, bs, data, start, end)
-                    continue
-                a = max(start, blkid * bs)
-                b = min(end, (blkid + 1) * bs)
-                self._add_gap(rec, a - start, b - a, DESCRIPTIONS[st2])
+                if st in RECOVERED or st == BlockStatus.UNKNOWN:
+                    todo = np.nonzero(~written[a_blk - lo:b_blk - lo])[0] + a_blk
+                    for blkid in todo.tolist():
+                        data, st2 = lv.read_block(blkid)
+                        if data is not None:
+                            self._write_block(f, blkid, bs, data, start, end)
+                        else:
+                            self._gap_blocks(rec, blkid, blkid + 1, bs, start, end, st2)
+                else:
+                    self._gap_blocks(rec, a_blk, b_blk, bs, start, end, st)
+            if covered_to < hi:
+                self._gap_blocks(rec, covered_to, hi, bs, start, end, BlockStatus.NO_METADATA)
             for g in rec.gaps:
                 self._fill(f, g.offset, g.length)
         self._finish(rec, path, image=True)
@@ -213,6 +227,13 @@ class Extractor:
         f.seek(s0 - start)
         f.write(chunk)
 
+    def _gap_blocks(self, rec: OutputRecord, b0: int, b1: int, bs: int, start: int, end: int,
+                    st: BlockStatus) -> None:
+        a = max(start, b0 * bs)
+        b = min(end, b1 * bs)
+        if b > a:
+            self._add_gap(rec, a - start, b - a, DESCRIPTIONS[st])
+
     @staticmethod
     def _add_gap(rec: OutputRecord, off: int, length: int, reason: str) -> None:
         if rec.gaps and rec.gaps[-1].offset + rec.gaps[-1].length == off and rec.gaps[-1].reason == reason:
@@ -223,14 +244,15 @@ class Extractor:
     def _finish(self, rec: OutputRecord, path: Path, image: bool) -> None:
         lost = rec.lost_bytes
         rec.status = "full" if lost == 0 else ("none" if lost >= rec.size and rec.size else "partial")
-        h = hashlib.sha256()
-        with open(path, "rb") as f:
-            while True:
-                b = f.read(8 << 20)
-                if not b:
-                    break
-                h.update(b)
-        rec.sha256 = h.hexdigest()
+        if self.opts.hash_outputs:
+            h = hashlib.sha256()
+            with open(path, "rb") as f:
+                while True:
+                    b = f.read(8 << 20)
+                    if not b:
+                        break
+                    h.update(b)
+            rec.sha256 = h.hexdigest()
         if rec.gaps:
             gp = Path(str(path) + ".gaps.json")
             gp.write_text(json.dumps({"file": str(path), "size": rec.size, "lost_bytes": lost,

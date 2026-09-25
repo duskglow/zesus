@@ -24,8 +24,13 @@ def add_extract_parser(sub) -> None:
     e.add_argument("--list", action="store_true", help="list what can be extracted and exit")
     e.add_argument("--volume", action="append", default=[], metavar="ID|NAME",
                    help="extract a whole volume as a raw image (repeatable)")
+    e.add_argument("--range", metavar="START:LEN",
+                   help="with --volume: only this byte range (e.g. 0x100000:64M)")
+    e.add_argument("--no-hash", action="store_true", help="skip SHA-256 of outputs (faster for huge images)")
     e.add_argument("--partition", action="append", default=[], metavar="VOL:IDX",
                    help="extract one partition of a volume as an image (repeatable)")
+    e.add_argument("--fs-image", type=int, action="append", default=[], metavar="FSID",
+                   help="extract a filesystem (inside a volume) as a raw image of exactly its own size")
     e.add_argument("--fs", type=int, action="append", default=[], metavar="FSID",
                    help="extract files from a filesystem (see --list)")
     e.add_argument("--path", action="append", default=[], metavar="GLOB",
@@ -96,7 +101,7 @@ def cmd_extract(args: argparse.Namespace) -> int:
         return 0
     if not args.out:
         raise SystemExit("--out is required")
-    if not (args.volume or args.partition or args.fs):
+    if not (args.volume or args.partition or args.fs or args.fs_image):
         raise SystemExit("nothing selected: use --volume, --partition or --fs (see --list)")
     src = RawSource(args.source)
     prev = db.execute("SELECT size, mtime_ns FROM sources ORDER BY id DESC LIMIT 1").fetchone()
@@ -108,15 +113,23 @@ def cmd_extract(args: argparse.Namespace) -> int:
     pool = pools[0]
     ex = Extractor(db, pool, Options(out_dir=Path(args.out), fill=args.fill,
                                      include_unverified=args.include_unverified, force=args.force,
-                                     partial_suffix=args.partial_suffix, sparse=not args.no_sparse))
+                                     partial_suffix=args.partial_suffix, sparse=not args.no_sparse,
+                                     hash_outputs=not args.no_hash))
     if args.include_unverified:
         log.warning("--include-unverified: blocks failing their checksum WILL be written; outputs may be corrupt")
     t0 = time.monotonic()
     for spec in args.volume:
         vid = _resolve_volume(db, spec)
         v = db.execute("SELECT * FROM volumes WHERE id=?", (vid,)).fetchone()
-        name = v["name"].replace("/", "_") + ".img"
-        ex.extract_volume_range(vid, 0, v["volsize"], name, "volume", v["name"])
+        name = v["name"].replace("/", "_")
+        if args.range:
+            from .main import _size
+            a, _, n = args.range.partition(":")
+            start, length = _size(a), _size(n)
+            ex.extract_volume_range(vid, start, min(length, v["volsize"] - start), f"{name}@{start:#x}.img",
+                                    "volume-range", f"{v['name']} [{start:#x}+{length:#x}]")
+        else:
+            ex.extract_volume_range(vid, 0, v["volsize"], name + ".img", "volume", v["name"])
     for spec in args.partition:
         vs, _, idx = spec.partition(":")
         vid = _resolve_volume(db, vs)
@@ -126,6 +139,17 @@ def cmd_extract(args: argparse.Namespace) -> int:
         vname = db.execute("SELECT name FROM volumes WHERE id=?", (vid,)).fetchone()[0]
         ex.extract_volume_range(vid, p["start"], p["length"], f"{vname.replace('/', '_')}-part{idx}.img",
                                 "partition", f"{vname} partition {idx}")
+    for fid in args.fs_image:
+        import json as _json
+        f = db.execute("SELECT * FROM filesystems WHERE id=?", (fid,)).fetchone()
+        if not f or f["volume_id"] is None:
+            raise SystemExit(f"filesystem {fid} is not inside a volume (ZFS datasets: use --fs)")
+        size = (_json.loads(f["info_json"] or "{}").get("details", {}).get("blocks") or 0) * (f["block_size"] or 0)
+        length = min(f["length"], size) if size else f["length"]
+        vname = db.execute("SELECT name FROM volumes WHERE id=?", (f["volume_id"],)).fetchone()[0]
+        ex.extract_volume_range(f["volume_id"], f["start"], length,
+                                f"{vname.replace('/', '_')}-fs{fid}-{f['fstype']}.img", "filesystem",
+                                f"{vname} {f['fstype']} at {f['start']:#x}")
     for fid in args.fs:
         ex.extract_files(fid, patterns=args.path or None, statuses=set(args.status.split(",")),
                          include_deleted=not args.no_deleted)
