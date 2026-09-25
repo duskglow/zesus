@@ -171,6 +171,66 @@ class VolumeReconstructor:
         im = self.pool.vdev_images[0]
         return im.source.read_exact(phys - im.base_offset, n)
 
+    # ------------------------------------------------------------------ association
+    def signature(self, root: Root, depth: int = 2) -> set[tuple]:
+        """DVA keys of the top block and its descendants down *depth* levels (upper tree only).
+
+        Copy-on-write generations of one dataset share every subtree that did not change
+        between them. Different datasets never share blocks (clones and dedup aside).
+        """
+        sig = {bp_key(root.top_bp)}
+        frontier = [root.top_bp]
+        for _ in range(depth):
+            nxt = []
+            for bp in frontier:
+                if bp.is_hole or bp.embedded or bp.level == 0:
+                    continue
+                rd = self.r.read(bp)
+                if not rd.data:
+                    continue
+                for child in blkptr.parse_array(rd.data):
+                    if not child.is_hole and not child.embedded:
+                        sig.add(bp_key(child))
+                        nxt.append(child)
+            frontier = nxt
+        return sig
+
+    def cluster(self, roots: list[Root], anchors: list[Root] | None = None) -> list[list[Root]]:
+        """Group roots into datasets by shared tree blocks (union-find).
+
+        With *anchors*, only the cluster connected to them is returned (anchors first).
+        Roots sharing nothing with the anchors are left out and reported, never merged by
+        size alone.
+        """
+        allr = (anchors or []) + roots
+        sigs = [self.signature(r) for r in allr]
+        parent = list(range(len(allr)))
+
+        def find(i: int) -> int:
+            while parent[i] != i:
+                parent[i] = parent[parent[i]]
+                i = parent[i]
+            return i
+
+        owner: dict[tuple, int] = {}
+        for i, sig in enumerate(sigs):
+            for k in sig:
+                j = owner.setdefault(k, i)
+                if j != i:
+                    parent[find(i)] = find(j)
+        groups: dict[int, list[int]] = defaultdict(list)
+        for i in range(len(allr)):
+            groups[find(i)].append(i)
+        if anchors:
+            a = find(0)
+            members = [allr[i] for i in groups[a] if i >= len(anchors)]
+            others = sum(len(g) for k, g in groups.items() if k != a)
+            if others:
+                log.info("%d carved root(s) with the same geometry share no blocks with %s and were "
+                         "not merged into it", others, self.ds.get("name"))
+            return [members]
+        return [[allr[i] for i in g] for g in groups.values()]
+
     # ------------------------------------------------------------------ helpers
     def read_many(self, cands: Iterable[Cand], keep_data: bool = True,
                   on_block=None) -> dict[tuple, BlockRead | Summary]:

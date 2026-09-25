@@ -239,15 +239,19 @@ def phase_reconstruct(ctx: ScanContext) -> bool:
                 geom = roots[0].geometry
                 known_geoms.add(geom)
                 carved = rec.roots_from_carving(geom)
+                if carved:
+                    carved = rec.cluster(carved, anchors=roots)[0]
                 _reconstruct_one(ctx, rec, ds, roots + carved, len(carved), limit)
 
         # ---- carved-only volumes
         probe = VolumeReconstructor(pool, ctx.db, pid, {"id": None, "name": "?", "destroy_txg": None})
-        groups: dict[tuple, list] = defaultdict(list)
+        by_geom: dict[tuple, list] = defaultdict(list)
         for r in probe.roots_from_carving(None):
             if r.geometry not in known_geoms:
-                groups[r.geometry].append(r)
-        for n, (geom, roots) in enumerate(sorted(groups.items(), key=lambda kv: -len(kv[1]))):
+                by_geom[r.geometry].append(r)
+        # same geometry is not enough: split into datasets by shared tree blocks
+        groups = [(g, cl) for g, rs in by_geom.items() for cl in probe.cluster(rs)]
+        for n, (geom, roots) in enumerate(sorted(groups, key=lambda kv: -len(kv[1]))):
             _nlevels, maxblkid, dblksz, _ = geom
             volsize = next((r.volsize for r in roots if r.volsize), None) or (maxblkid + 1) * dblksz
             lo, hi = min(r.txg for r in roots), max(r.txg for r in roots)
