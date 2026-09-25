@@ -234,7 +234,7 @@ class Extractor:
         if rec.gaps:
             gp = Path(str(path) + ".gaps.json")
             gp.write_text(json.dumps({"file": str(path), "size": rec.size, "lost_bytes": lost,
-                                      "gaps": [g.__dict__ for g in rec.gaps]}, indent=1))
+                                      "gaps": [g.__dict__ for g in rec.gaps]}, indent=1), encoding="utf-8")
         if image:
             write_ddrescue_map(Path(str(path) + ".mapfile"), rec.size, rec.gaps)
         if rec.status != "full" and self.opts.partial_suffix:
@@ -390,14 +390,14 @@ class Extractor:
         old = []
         if path.exists():
             try:
-                old = json.loads(path.read_text()).get("outputs", [])
+                old = json.loads(path.read_text(encoding="utf-8")).get("outputs", [])
             except Exception:
                 old = []
         outs = old + [{**r.__dict__, "gaps": [g.__dict__ for g in r.gaps], "lost_bytes": r.lost_bytes}
                       for r in self.records]
         summary = {s: sum(1 for o in outs if o["status"] == s) for s in ("full", "partial", "none")}
         path.write_text(json.dumps({"tool": "zfs-forensic-recovery", "written_at": now(),
-                                    "summary": summary, **(extra or {}), "outputs": outs}, indent=1))
+                                    "summary": summary, **(extra or {}), "outputs": outs}, indent=1), encoding="utf-8")
         return path
 
 
