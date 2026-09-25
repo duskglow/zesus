@@ -412,7 +412,7 @@ def write_ddrescue_map(path: Path, size: int, gaps: Iterable[GapRecord]) -> None
         pos = g.offset + g.length
     if pos < size:
         lines.append(f"0x{pos:08X}  0x{size - pos:08X}  +")
-    path.write_text("\n".join(lines) + "\n")
+    path.write_text("\n".join(lines) + "\n", encoding="ascii")
 
 
 _WIN_BAD = re.compile(r'[<>:"\\|?*\x00-\x1f]')
