@@ -104,7 +104,6 @@ class VolumeReconstructor:
         self.ds = dataset
         self.destroy_txg = dataset.get("destroy_txg") or (pool.max_txg + 1)
         self.stats = ReconstructStats()
-        self._carved_by_loc: set[tuple[int, int]] = set()
 
     # ------------------------------------------------------------------ roots
     def roots_from_rings(self) -> list[Root]:

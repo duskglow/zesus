@@ -21,8 +21,9 @@ is destroyed, its blocks are freed but not erased. The disk also still holds man
    placing orphaned indirect blocks by matching their children;
 5. **verifies** every data block against its checksum, falling back to older generations when
    the newest copy was overwritten;
-6. looks **inside** each volume for partition tables and filesystems, and builds a per-file
-   inventory with recovery status (`full` / `partial` / `none`).
+6. looks **inside** each volume for partition tables and filesystems, and inventories ZFS
+   filesystem datasets directly. It builds a per-file inventory with recovery status
+   (`full` / `partial` / `none`).
 
 Everything goes into a SQLite **map**. The map is an index of locations, sizes, checksums
 and statuses, never data. The extractor uses the map plus the original image to write out
@@ -70,7 +71,10 @@ zfsrecover extract case.sqlite /dev/sdb -o out/ --volume 1              # whole 
 zfsrecover extract case.sqlite /dev/sdb -o out/ --partition 1:1         # one partition of it
 zfsrecover extract case.sqlite /dev/sdb -o out/ --fs 1 --path '/home/*' # selected files
 
-# 4. Or browse in a local web UI
+# 4. Write a recovery report: what was found, what is lost and why (Markdown + per-file CSV)
+zfsrecover report case.sqlite -o case-report.md
+
+# 5. Or browse in a local web UI
 zfsrecover web case.sqlite --source /dev/sdb       # http://127.0.0.1:8765/
 ```
 
@@ -88,7 +92,8 @@ Keep the map and the outputs on a **different disk** from the evidence.
 | Features | lz4, gzip, zle, lzjb, zstd; fletcher2/4, sha256, sha512, blake3; embedded data; gang blocks; large dnodes; hole_birth |
 | Encryption | detected and reported; decryption not implemented |
 | Partition tables | GPT (with backup-header fallback), MBR with logical partitions |
-| Filesystems (inventory) | ext2/3/4, including virtual journal replay, deleted-inode and orphan discovery |
+| ZFS filesystem datasets | file inventory and extraction for live, historical and destroyed-but-reachable datasets (snapshots with `--snapshots`); SA and legacy znodes, unlinked set, orphans |
+| Filesystems in zvols (inventory) | ext2/3/4, including virtual journal replay, deleted-inode and orphan discovery |
 | Filesystems (identify only) | XFS, NTFS, exFAT, FAT, btrfs, LUKS, BitLocker, LVM2, swap, ISO9660, F2FS, HFS+, APFS, md-raid, ZFS |
 
 New filesystems are plugins and need no change to core code. See
