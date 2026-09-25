@@ -1,0 +1,118 @@
+"""The SQLite map database."""
+
+from __future__ import annotations
+
+import datetime as _dt
+import json
+import logging
+import sqlite3
+from contextlib import contextmanager
+from importlib import resources
+from pathlib import Path
+from typing import Any
+
+from ..io import guard
+
+log = logging.getLogger(__name__)
+
+SCHEMA_VERSION = 1
+
+
+def now() -> str:
+    return _dt.datetime.now(_dt.timezone.utc).isoformat(timespec="seconds")
+
+
+class MapDB:
+    def __init__(self, path: str | Path, *, readonly: bool = False) -> None:
+        self.path = Path(path)
+        guard.assert_not_protected([self.path])
+        if readonly:
+            uri = self.path.resolve().as_uri() + "?mode=ro"
+            self.conn = sqlite3.connect(uri, uri=True, check_same_thread=False)
+        else:
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            self.conn = sqlite3.connect(self.path, check_same_thread=False)
+            self.conn.execute("PRAGMA journal_mode=WAL")
+            self.conn.execute("PRAGMA synchronous=NORMAL")
+        self.conn.row_factory = sqlite3.Row
+        self.conn.execute("PRAGMA foreign_keys=ON")
+        if not readonly:
+            self._init_schema()
+
+    def _init_schema(self) -> None:
+        cur = self.conn.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='meta'")
+        exists = cur.fetchone() is not None
+        if exists:
+            v = self.get_meta("schema_version")
+            if v is not None and int(v) != SCHEMA_VERSION:
+                raise RuntimeError(f"map {self.path} has schema v{v}; this tool expects v{SCHEMA_VERSION}")
+        sql = resources.files("zfsrecover.map").joinpath("schema.sql").read_text(encoding="utf-8")
+        self.conn.executescript(sql)
+        if not exists:
+            self.set_meta("schema_version", str(SCHEMA_VERSION))
+            self.set_meta("created_at", now())
+        self.conn.commit()
+
+    # -- meta / progress ----------------------------------------------------------
+    def get_meta(self, key: str) -> str | None:
+        r = self.conn.execute("SELECT value FROM meta WHERE key=?", (key,)).fetchone()
+        return r[0] if r else None
+
+    def set_meta(self, key: str, value: str) -> None:
+        self.conn.execute("INSERT INTO meta(key,value) VALUES(?,?) "
+                          "ON CONFLICT(key) DO UPDATE SET value=excluded.value", (key, value))
+
+    def is_done(self, phase: str, unit: str = "*") -> bool:
+        r = self.conn.execute("SELECT state FROM progress WHERE phase=? AND unit=?", (phase, unit)).fetchone()
+        return bool(r and r[0] == "done")
+
+    def done_units(self, phase: str) -> set[str]:
+        return {r[0] for r in self.conn.execute(
+            "SELECT unit FROM progress WHERE phase=? AND state='done'", (phase,))}
+
+    def mark(self, phase: str, unit: str = "*", state: str = "done", detail: str | None = None) -> None:
+        self.conn.execute(
+            "INSERT INTO progress(phase,unit,state,detail,finished_at) VALUES(?,?,?,?,?) "
+            "ON CONFLICT(phase,unit) DO UPDATE SET state=excluded.state, detail=excluded.detail, "
+            "finished_at=excluded.finished_at", (phase, unit, state, detail, now()))
+
+    def reset_phase(self, phase: str) -> None:
+        self.conn.execute("DELETE FROM progress WHERE phase=?", (phase,))
+
+    def event(self, level: str, component: str, message: str, **context: Any) -> None:
+        self.conn.execute("INSERT INTO events(ts,level,component,message,context) VALUES(?,?,?,?,?)",
+                          (now(), level, component, message,
+                           json.dumps(context, default=str) if context else None))
+
+    @contextmanager
+    def tx(self):
+        try:
+            yield self.conn
+            self.conn.commit()
+        except BaseException:
+            self.conn.rollback()
+            raise
+
+    def execute(self, sql: str, params: Any = ()) -> sqlite3.Cursor:
+        return self.conn.execute(sql, params)
+
+    def insert(self, table: str, row: dict[str, Any]) -> int:
+        cols = ",".join(row)
+        qs = ",".join("?" for _ in row)
+        cur = self.conn.execute(f"INSERT INTO {table}({cols}) VALUES({qs})", tuple(row.values()))
+        return int(cur.lastrowid or 0)
+
+    def commit(self) -> None:
+        self.conn.commit()
+
+    def close(self) -> None:
+        self.conn.close()
+
+
+def j(obj: Any) -> str:
+    """JSON-encode with big ints and bytes handled."""
+    def default(o: Any) -> Any:
+        if isinstance(o, (bytes, bytearray)):
+            return o.hex()
+        return str(o)
+    return json.dumps(obj, default=default, sort_keys=True)

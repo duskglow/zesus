@@ -1,0 +1,72 @@
+[build-system]
+requires = ["hatchling>=1.21"]
+build-backend = "hatchling.build"
+
+[project]
+name = "zfs-forensic-recovery"
+version = "0.1.0.dev0"
+description = "Forensic scanner and extractor for ZFS pools, including destroyed datasets and zvols"
+readme = "README.md"
+license = "Apache-2.0"
+license-files = ["LICENSE"]
+requires-python = ">=3.10"
+authors = [{ name = "zfs-forensic-recovery contributors" }]
+keywords = ["zfs", "forensics", "data recovery", "zvol", "ext4", "carving"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Environment :: Console",
+    "Intended Audience :: System Administrators",
+    "Intended Audience :: Information Technology",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Topic :: System :: Filesystems",
+    "Topic :: System :: Recovery Tools",
+    "Topic :: Security",
+]
+dependencies = [
+    "numpy>=1.24",
+    "lz4>=4.0",
+]
+
+[project.optional-dependencies]
+zstd = ["zstandard>=0.21"]
+blake3 = ["blake3>=0.3"]
+accel = ["numba>=0.58"]
+web = ["fastapi>=0.110", "uvicorn>=0.27", "jinja2>=3.1"]
+all = ["zfs-forensic-recovery[zstd,blake3,accel,web]"]
+dev = ["zfs-forensic-recovery[zstd,blake3]", "pytest>=8", "ruff>=0.5", "mypy>=1.8"]
+
+[project.scripts]
+zfsrecover = "zfsrecover.cli.main:main"
+zfsrecover-scan = "zfsrecover.cli.main:scan_main"
+zfsrecover-extract = "zfsrecover.cli.main:extract_main"
+
+[project.entry-points."zfsrecover.filesystems"]
+ext4 = "zfsrecover.fs.ext4:Ext4Plugin"
+
+[project.entry-points."zfsrecover.partitions"]
+gpt = "zfsrecover.partitions.gpt:GptScheme"
+mbr = "zfsrecover.partitions.mbr:MbrScheme"
+
+[project.urls]
+Homepage = "https://github.com/OWNER/zfs-forensic-recovery"
+Issues = "https://github.com/OWNER/zfs-forensic-recovery/issues"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/zfsrecover"]
+
+
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = [
+    "image: needs the real test image (set ZFR_TEST_IMAGE)",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP", "SIM"]
+ignore = ["E501"]

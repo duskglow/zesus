@@ -1,0 +1,17 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+build/
+dist/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+# scan outputs and extracted data never belong in the repo
+*.sqlite
+*.sqlite-wal
+*.sqlite-shm
+*.log.jsonl
+*.img
+/out/
+/work/
