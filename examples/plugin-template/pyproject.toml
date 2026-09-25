@@ -1,0 +1,14 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "zfsrecover-example-fs"
+version = "0.1.0"
+dependencies = ["zfs-forensic-recovery"]
+
+[project.entry-points."zfsrecover.filesystems"]
+examplefs = "zfsrecover_example:ExampleFsPlugin"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/zfsrecover_example"]

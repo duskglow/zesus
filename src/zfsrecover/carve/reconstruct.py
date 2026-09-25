@@ -37,7 +37,7 @@ from ..map.codes import BlockStatus
 from ..map.db import MapDB
 from ..zfs import blkptr
 from ..zfs.blkptr import BlockPointer
-from ..zfs.constants import Compression, ChecksumType, DmuType
+from ..zfs.constants import ChecksumType, Compression, DmuType
 from ..zfs.dnode import Dnode, parse_dnode
 from ..zfs.objset import Objset
 from ..zfs.pool import Pool

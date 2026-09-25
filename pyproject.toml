@@ -69,4 +69,4 @@ target-version = "py310"
 
 [tool.ruff.lint]
 select = ["E", "F", "W", "I", "B", "UP", "SIM"]
-ignore = ["E501"]
+ignore = ["E501", "SIM102", "SIM105", "SIM108", "SIM115"]

@@ -307,11 +307,38 @@ class Ext4Handle(FsHandle):
         if run_n:
             yield run_l, run_p, run_n, False
 
+    # ------------------------------------------------------------------ inline data
+    def ibody_xattrs(self, inode: Inode) -> dict[tuple[int, str], bytes]:
+        """Extended attributes stored in the inode body (after i_extra_isize)."""
+        r = inode.raw
+        if len(r) <= 128:
+            return {}
+        extra = struct.unpack_from("<H", r, 0x80)[0]
+        base = 128 + extra
+        if base + 4 > len(r) or struct.unpack_from("<I", r, base)[0] != 0xEA020000:
+            return {}
+        first = base + 4
+        out: dict[tuple[int, str], bytes] = {}
+        off = first
+        while off + 16 <= len(r):
+            name_len, name_index, value_offs, value_inum, value_size = struct.unpack_from("<BBHII", r, off)
+            if name_len == 0 and name_index == 0 and value_offs == 0 and value_inum == 0:
+                break
+            name = r[off + 16:off + 16 + name_len].decode("utf-8", "replace")
+            if not value_inum and first + value_offs + value_size <= len(r):
+                out[(name_index, name)] = r[first + value_offs:first + value_offs + value_size]
+            off += (16 + name_len + 3) & ~3
+        return out
+
+    def inline_data(self, inode: Inode) -> bytes:
+        """i_block (60 bytes) followed by the 'system.data' xattr continuation."""
+        return inode.i_block + self.ibody_xattrs(inode).get((7, "data"), b"")
+
     # ------------------------------------------------------------------ directories
     def read_file_bytes(self, inode: Inode, limit: int | None = None) -> bytes:
         size = inode.size if limit is None else min(inode.size, limit)
         if inode.flags & EXT4_INLINE_DATA_FL:
-            return inode.i_block[:size]
+            return self.inline_data(inode)[:size]
         out = bytearray(size)
         for lb, pb, n, unwritten in self.file_blocks(inode):
             start = lb * self.bs
@@ -328,23 +355,33 @@ class Ext4Handle(FsHandle):
         return bytes(out)
 
     def dir_entries(self, inode: Inode) -> Iterator[tuple[int, str, int]]:
-        data = self.read_file_bytes(inode)
+        if inode.flags & EXT4_INLINE_DATA_FL:
+            # inline dir: i_block = parent inode (4 bytes) + entries; xattr holds more entries
+            regions = [inode.i_block[4:], self.ibody_xattrs(inode).get((7, "data"), b"")]
+        else:
+            data = self.read_file_bytes(inode)
+            regions = [data[b:b + self.bs] for b in range(0, len(data), self.bs)]
+        for region in regions:
+            yield from self._parse_dirents(region)
+
+    def _parse_dirents(self, data: bytes) -> Iterator[tuple[int, str, int]]:
+        """Parse one directory block (or inline region). htree index blocks look like a
+        single empty entry to a linear parser, so they are skipped naturally, as are
+        metadata_csum tail entries (inode 0)."""
         filetype = bool(self.sb.feature_incompat & INCOMPAT_FILETYPE)
-        for base in range(0, len(data), self.bs):
-            off = base
-            end = min(base + self.bs, len(data))
-            while off + 8 <= end:
-                ino, rec_len, name_len, ftype = struct.unpack_from("<IHBB", data, off)
-                if rec_len < 8 or off + rec_len > end:
-                    break
-                if not filetype:
-                    name_len |= ftype << 8
-                    ftype = 0
-                if ino and name_len and 8 + name_len <= rec_len:
-                    name = data[off + 8:off + 8 + name_len].decode("utf-8", "surrogateescape")
-                    if name not in (".", ".."):
-                        yield ino, name, ftype
-                off += rec_len
+        off, end = 0, len(data)
+        while off + 8 <= end:
+            ino, rec_len, name_len, ftype = struct.unpack_from("<IHBB", data, off)
+            if rec_len < 8 or off + rec_len > end:
+                break
+            if not filetype:
+                name_len |= ftype << 8
+                ftype = 0
+            if ino and name_len and 8 + name_len <= rec_len:
+                name = data[off + 8:off + 8 + name_len].decode("utf-8", "surrogateescape")
+                if name not in (".", ".."):
+                    yield ino, name, ftype
+            off += rec_len
 
     # ------------------------------------------------------------------ journal
     def _replay_journal(self) -> None:
@@ -475,8 +512,10 @@ class Ext4Handle(FsHandle):
         size = inode.size
         if entry.type not in (FILE, SYMLINK, DIR):
             return
-        if inode.flags & EXT4_INLINE_DATA_FL or (entry.type == SYMLINK and entry.link_target is not None
-                                                   and size < 60 and not inode.blocks):
+        if inode.flags & EXT4_INLINE_DATA_FL:
+            yield Extent(0, size, None, "inline", self.inline_data(inode)[:size])
+            return
+        if entry.type == SYMLINK and size < 60 and not inode.blocks and not inode.flags & EXT4_EXTENTS_FL:
             yield Extent(0, size, None, "inline", inode.i_block[:size])
             return
         pos = 0

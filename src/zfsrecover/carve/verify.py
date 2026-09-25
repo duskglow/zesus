@@ -284,7 +284,7 @@ class Verifier:
                     if bp.is_hole or raw == cur_raw:
                         continue
                     options.append((bp.birth, ci, bp))
-                for birth, ci, bp in sorted(options, key=lambda t: -t[0]):
+                for _birth, ci, bp in sorted(options, key=lambda t: -t[0]):
                     rd = self.pool.reader.read(bp, decompress=False)
                     if rd.status in (ReadStatus.OK, ReadStatus.UNVERIFIED):
                         sp.choice[s] = ci
@@ -358,7 +358,7 @@ def summarize(db: MapDB, volume_id: int) -> dict[str, int]:
         counts += np.bincount(st, minlength=256)
         change = np.nonzero(np.diff(st.astype(np.int16)))[0] + 1
         bounds = [0, *change.tolist(), len(st)]
-        for a, b in zip(bounds[:-1], bounds[1:]):
+        for a, b in zip(bounds[:-1], bounds[1:], strict=True):
             emit(int(st[a]), r["first_blkid"] + a, b - a)
         pos = r["first_blkid"] + r["count"]
     if n_blocks and pos < n_blocks:

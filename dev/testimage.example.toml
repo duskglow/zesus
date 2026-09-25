@@ -1,0 +1,3 @@
+# Copy to dev/testimage.toml and point at your own image (or set ZFR_TEST_IMAGE).
+[image]
+path = '/path/to/disk.img'

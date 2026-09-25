@@ -43,7 +43,7 @@ def print_info(db: MapDB, out: TextIO) -> None:
           f"status={v['status']}\n")
         n = v["n_blocks"] or 0
         if n:
-            def pct(x: int | None) -> str:
+            def pct(x: int | None, n: int = n) -> str:
                 return f"{100 * (x or 0) / n:.2f}%"
             w(f"  blocks: {n}  verified={v['n_verified']} ({pct(v['n_verified'])})  "
               f"holes/unwritten={v['n_holes']} ({pct(v['n_holes'])})  stale={v['n_stale']}  "

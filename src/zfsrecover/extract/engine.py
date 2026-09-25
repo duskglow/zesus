@@ -29,11 +29,11 @@ from ..carve.verify import chosen_blocks, load_spans, windows
 from ..io import guard
 from ..map.codes import DESCRIPTIONS, RECOVERED, BlockStatus
 from ..map.db import MapDB, now
+from ..volume.logical import LogicalVolume
 from ..zfs import compress
 from ..zfs.checksum import compute
 from ..zfs.constants import VDEV_LABEL_START_SIZE, ChecksumType
 from ..zfs.pool import Pool
-from ..volume.logical import LogicalVolume
 from .sparse import make_sparse
 
 log = logging.getLogger(__name__)

@@ -87,7 +87,7 @@ def phase_datasets(ctx: ScanContext) -> None:
     reachable from older uberblocks have vanished since (destroyed or renamed), but their
     objset roots are still readable, and those roots are prime material for recovery.
     """
-    from ..zfs.constants import ObjsetType, ZVOL_OBJ, ZVOL_ZAP_OBJ
+    from ..zfs.constants import ZVOL_OBJ, ZVOL_ZAP_OBJ, ObjsetType
     from ..zfs.dsl import Dsl
 
     for pool in ctx.pools:
@@ -177,7 +177,7 @@ def phase_carve(ctx: ScanContext) -> bool:
                                  asize=asize, ashift=vt.get("ashift", 9))
             last = [0.0]
 
-            def progress(pos: int, end: int, st, rate: float) -> None:
+            def progress(pos: int, end: int, st, rate: float, last=last, top=top) -> None:
                 import time
                 t = time.monotonic()
                 if t - last[0] >= opts.get("progress_interval", 30):
@@ -341,8 +341,9 @@ def phase_contents(ctx: ScanContext) -> bool:
 
 
 def inventory_fs(ctx: ScanContext, vid: int, part_id, start: int, length: int, dev, plugin, cov) -> None:
-    from ..fs.api import DIR, FILE, SYMLINK
     import time as _time
+
+    from ..fs.api import DIR, FILE, SYMLINK
     h = plugin.open(dev)
     info = h.info()
     for w in info.warnings:

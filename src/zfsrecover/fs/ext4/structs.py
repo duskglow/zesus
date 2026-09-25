@@ -214,7 +214,7 @@ def parse_inode(ino: int, b: bytes, off: int, inode_size: int) -> Inode:
     crtime = None
     if inode_size > 128:
         extra = struct.unpack_from("<H", r, 0x80)[0]
-        if extra >= 0x18 and 0x94 <= 128 + extra:
+        if extra >= 0x18 and 128 + extra >= 0x94:
             crtime = struct.unpack_from("<I", r, 0x90)[0]
     return Inode(ino=ino, mode=mode, uid=uid_lo | (uid_hi << 16), gid=gid_lo | (gid_hi << 16),
                  size=size_lo | (size_hi << 32), atime=atime, ctime=ctime, mtime=mtime, dtime=dtime,
