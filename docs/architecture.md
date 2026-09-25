@@ -50,7 +50,16 @@
    A block that fails is retried on its other DVAs and then on older generations
    (`ok_stale`). Progress is checkpointed.
 6. **contents**: partitions → filesystem detection → plugin inventory → per-file status
-   (`full` / `partial` / `none`) computed from the volume's coverage.
+   (`full` / `partial` / `none`) computed from the volume's coverage. ZFS filesystem
+   datasets are inventoried by `zfs/zpl.py`, with every file block checksum-verified. For
+   those files the map stores the unrecoverable ranges directly, since they are not
+   inside a volume.
+
+Known limitations:
+* Destroyed ZFS *filesystem* datasets are recovered when an uberblock in the ring can
+  still reach them. Carved-only reconstruction (as done for volumes) is not implemented
+  for them yet.
+* RAIDZ/dRAID and encrypted datasets are detected but not decoded.
 
 ## Why the map stores L1 pointers instead of every L0
 
