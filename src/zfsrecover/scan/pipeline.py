@@ -99,6 +99,12 @@ def run(ctx: ScanContext, phases: list[str]) -> None:
             continue
         log.info("=== phase: %s", name)
         t0 = time.monotonic()
+        # Re-running a phase invalidates everything derived from it. (Carving is additive
+        # and resumes by chunk, so it only invalidates phases after it.)
+        with ctx.db.tx():
+            for later in ORDER[ORDER.index(name) + 1:]:
+                if later != "carve":
+                    ctx.db.reset_phase(later)
         complete = PHASES[name](ctx)
         if ctx.stop is not None and ctx.stop.event.is_set():
             log.warning("stopped during phase %s", name)

@@ -85,6 +85,18 @@ def cmd_info(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_report(args: argparse.Namespace) -> int:
+    from ..io import guard
+    from ..map.db import MapDB
+    from .fullreport import write_report
+    logsetup.setup(args.verbose)
+    out = Path(args.out)
+    guard.assert_not_protected([out])
+    write_report(MapDB(args.map, readonly=True), out, out.with_suffix(".csv"), args.max_items)
+    log.info("report written to %s (+ %s)", out, out.with_suffix(".csv"))
+    return 0
+
+
 def cmd_web(args: argparse.Namespace) -> int:
     logsetup.setup(args.verbose, args.log)
     try:
@@ -110,6 +122,11 @@ def build_parser() -> argparse.ArgumentParser:
     i.set_defaults(func=cmd_info)
     from .extract_cmd import add_extract_parser
     add_extract_parser(sub)
+    rp = sub.add_parser("report", help="write a Markdown recovery report and a per-file CSV")
+    rp.add_argument("map")
+    rp.add_argument("-o", "--out", required=True, help="report file (.md); a .csv is written alongside")
+    rp.add_argument("--max-items", type=int, default=200)
+    rp.set_defaults(func=cmd_report)
     wb = sub.add_parser("web", help="browse a map in a local web UI (needs the [web] extra)")
     wb.add_argument("map")
     wb.add_argument("--source", help="image/device, to enable extraction from the UI")

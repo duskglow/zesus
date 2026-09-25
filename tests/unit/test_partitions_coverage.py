@@ -72,3 +72,17 @@ def test_coverage_lookup(tmp_path):
     assert c.lost_bytes(0, 10 * bs) == 0
     assert c.lost_bytes(11 * bs + 5, 10) == 10
     assert c.status_at(11) == "cksum_mismatch"
+
+
+def test_lost_ranges(tmp_path):
+    from zfsrecover.volume.coverage import Coverage
+    db = MapDB(tmp_path / "m.sqlite")
+    db.execute("INSERT INTO pools(id,name,guid) VALUES(1,'p','1')")
+    db.execute("INSERT INTO volumes(id,name,volblocksize,n_blocks) VALUES(1,'v',1024,20)")
+    for a, n, s in [(0, 5, "ok"), (5, 2, "cksum_mismatch"), (7, 10, "ok"), (17, 3, "zeroed")]:
+        db.execute("INSERT INTO volume_coverage VALUES(1,?,?,?,?)", (a, n, s, ""))
+    db.commit()
+    c = Coverage(db, 1)
+    assert c.lost_ranges(0, 20 * 1024) == [(5120, 2048, "cksum_mismatch"), (17408, 3072, "zeroed")]
+    assert c.lost_ranges(5500, 100) == [(5500, 100, "cksum_mismatch")]
+    assert c.lost_ranges(19 * 1024, 4096) == [(19456, 1024, "zeroed"), (20480, 3072, "no_metadata")]

@@ -60,6 +60,35 @@ class Coverage:
             return 0
         return min(length, lost * bs)
 
+    def lost_ranges(self, offset: int, length: int) -> list[tuple[int, int, str]]:
+        """Lost sub-ranges of [offset, offset+length) as (byte offset, length, status),
+        at block granularity, clipped to the requested range."""
+        if length <= 0:
+            return []
+        bs = self.bs
+        first, last_excl = offset // bs, (offset + length - 1) // bs + 1
+        out: list[tuple[int, int, str]] = []
+
+        def add(b0: int, b1: int, st: str) -> None:
+            a = max(offset, b0 * bs)
+            e = min(offset + length, b1 * bs)
+            if e > a:
+                if out and out[-1][0] + out[-1][1] == a and out[-1][2] == st:
+                    out[-1] = (out[-1][0], out[-1][1] + e - a, st)
+                else:
+                    out.append((a, e - a, st))
+
+        limit = int(self.ends[-1]) if len(self.ends) else 0
+        if first < limit:
+            i = int(np.searchsorted(self.ends, first, side="right"))
+            while i < len(self.starts) and self.starts[i] < last_excl:
+                if self.lost[i]:
+                    add(max(first, int(self.starts[i])), min(last_excl, int(self.ends[i])), self.status[i])
+                i += 1
+        if last_excl > limit:
+            add(max(first, limit), last_excl, BlockStatus.NO_METADATA.name.lower())
+        return out
+
     def status_at(self, blkid: int) -> str:
         i = int(np.searchsorted(self.ends, blkid, side="right"))
         if i < len(self.starts) and self.starts[i] <= blkid:
