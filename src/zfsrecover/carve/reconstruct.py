@@ -33,6 +33,8 @@ from collections import defaultdict
 from collections.abc import Iterable
 from dataclasses import dataclass, field
 
+import numpy as np
+
 from ..map.codes import BlockStatus
 from ..map.db import MapDB
 from ..zfs import blkptr
@@ -171,9 +173,16 @@ class VolumeReconstructor:
         return im.source.read_exact(phys - im.base_offset, n)
 
     # ------------------------------------------------------------------ helpers
-    def read_many(self, cands: Iterable[Cand]) -> dict[tuple, BlockRead]:
-        """Read blocks in physical order (the source may be a spinning disk)."""
-        out: dict[tuple, BlockRead] = {}
+    def read_many(self, cands: Iterable[Cand], keep_data: bool = True,
+                  on_block=None) -> dict[tuple, BlockRead | Summary]:
+        """Read blocks in physical order (the source may be a spinning disk).
+
+        With ``keep_data=False`` only a compact :class:`Summary` of each block's children is
+        kept, and ``on_block(key, words)`` is called with the full child pointers first.
+        This keeps memory bounded for the tens of thousands of level-1 blocks in a large
+        volume.
+        """
+        out: dict[tuple, BlockRead | Summary] = {}
         uniq = {}
         for c in cands:
             if not c.bp.is_hole:
@@ -182,28 +191,38 @@ class VolumeReconstructor:
                        if not kv[1].embedded else (-1, 0))
         t0 = time.monotonic()
         for i, (k, bp) in enumerate(order):
-            out[k] = self.r.read(bp)
+            rd = self.r.read(bp)
+            if keep_data or rd.data is None:
+                out[k] = rd
+            else:
+                words = child_words(rd.data)
+                if on_block:
+                    on_block(k, words)
+                out[k] = Summary.of(words, rd.status)
             if i and i % 5000 == 0:
                 log.info("  read %d/%d indirect blocks (%.0f/s)", i, len(order), i / (time.monotonic() - t0))
         return out
 
-    def carved_at_level(self, level: int) -> list[tuple[BlockPointer, BlockRead]]:
-        """Carved indirect blocks for ZVOL data at *level* (children at level-1).
+    def carved_at_level(self, level: int, skip: set[tuple[int, int]]):
+        """Yield carved indirect blocks for ZVOL data at *level* (children at level-1).
 
-        Each comes back as a synthetic BP (checksum computed from the block as found, since
-        no parent vouches for it) together with its decompressed contents. Blocks are read
-        once, in physical order.
+        Each is a synthetic BP (checksum computed from the block as found, since no parent
+        vouches for it) with its child pointers. Locations in *skip* are not read at all.
+        Blocks are read once, in physical order.
         """
         import lz4.block
 
         from ..zfs.checksum import fletcher4
-        out = []
-        for row in self.db.execute(
-                "SELECT dva_offset, vdev_top, phys, psize_hint, lsize, max_birth FROM carved WHERE pool_id=? "
-                "AND kind='indirect' AND child_type=? AND child_level=? AND max_birth < ? ORDER BY phys",
-                (self.pool_id, DmuType.ZVOL, level - 1, self.destroy_txg)):
-            if (row["vdev_top"], row["dva_offset"]) in self._carved_by_loc:
-                continue
+        rows = self.db.execute(
+            "SELECT dva_offset, vdev_top, phys, psize_hint, lsize, max_birth FROM carved WHERE pool_id=? "
+            "AND kind='indirect' AND child_type=? AND child_level=? AND max_birth < ? ORDER BY phys",
+            (self.pool_id, DmuType.ZVOL, level - 1, self.destroy_txg)).fetchall()
+        todo = [r for r in rows if (r["vdev_top"], r["dva_offset"]) not in skip]
+        log.info("level %d: %d carved candidate blocks (%d already known)", level, len(todo), len(rows) - len(todo))
+        t0 = time.monotonic()
+        for i, row in enumerate(todo):
+            if i and i % 20000 == 0:
+                log.info("  carved %d/%d (%.0f/s)", i, len(todo), i / (time.monotonic() - t0))
             raw = self._read_phys(row["phys"], row["psize_hint"])
             try:
                 clen = struct.unpack_from(">I", raw, 0)[0]
@@ -215,8 +234,7 @@ class VolumeReconstructor:
                 psize=row["psize_hint"], lsize=row["lsize"], comp=Compression.LZ4,
                 cksum_type=ChecksumType.FLETCHER_4, type=DmuType.ZVOL, level=level,
                 birth=row["max_birth"], cksum=fletcher4(raw))
-            out.append((bp, BlockRead(ReadStatus.OK, data)))
-        return out
+            yield bp, data
 
     # ------------------------------------------------------------------ main
     def build(self, roots: list[Root], limit_blocks: int | None = None) -> tuple[dict[int, list[Cand]], Root]:
@@ -236,63 +254,60 @@ class VolumeReconstructor:
         top = nlevels - 1
         self.stats.roots = len(roots)
         cur: dict[int, list[Cand]] = defaultdict(list)
-        seen_keys: dict[int, set] = defaultdict(set)
+        seen: set = set()
         for r in sorted(roots, key=lambda r: -r.txg):
             k = bp_key(r.top_bp)
-            if k not in seen_keys[0]:
-                seen_keys[0].add(k)
+            if k not in seen:
+                seen.add(k)
                 cur[0].append(Cand(r.top_bp, False, r.provenance))
         level = top
         while level >= 1:
-            n_pos = sum(1 for p in cur if cur[p])
-            log.info("level %d: %d positions, %d candidate blocks", level, n_pos, sum(len(v) for v in cur.values()))
-            reads = self.read_many(c for v in cur.values() for c in v)
+            last = level == 1
+            log.info("level %d: %d positions, %d candidate blocks", level, sum(1 for p in cur if cur[p]),
+                     sum(len(v) for v in cur.values()))
+            # placement index over the children of every known block at this level
+            pos_of: dict[tuple, int] = {}
+            for pos, cands in cur.items():
+                for c in cands:
+                    pos_of.setdefault(bp_key(c.bp), pos)
+            idx = ChildIndex()
+            reads = self.read_many((c for v in cur.values() for c in v), keep_data=not last,
+                                   on_block=lambda k, w, idx=idx, pos_of=pos_of: idx.add(w, pos_of[k]))
+            if not last:
+                for k, rd in reads.items():
+                    if rd.data:
+                        idx.add(child_words(rd.data), pos_of[k])
             st = defaultdict(int)
             for rd in reads.values():
                 st[rd.status.value] += 1
             self.stats.per_level[level] = dict(st)
             log.info("level %d reads: %s", level, dict(st))
+            idx.freeze()
 
             # --- place carved orphans at this level
             known_locs = {bp_key(c.bp)[:2] for v in cur.values() for c in v if not c.bp.is_hole}
-            index: dict[tuple[int, int, int], int] = {}
-            for pos, cands in cur.items():
-                for c in cands:
-                    rd = reads.get(bp_key(c.bp))
-                    if rd and rd.data:
-                        for s, child in enumerate(blkptr.parse_array(rd.data)):
-                            if not child.is_hole and not child.embedded:
-                                index[(s, child.dvas[0].vdev, child.dvas[0].offset)] = pos
             placed = unplaced = ambiguous = 0
-            for bp, rd in self.carved_at_level(level):
-                if (bp.dvas[0].vdev, bp.dvas[0].offset) in known_locs:
-                    continue
-                votes = defaultdict(int)
-                for s, child in enumerate(blkptr.parse_array(rd.data)):
-                    if not child.is_hole and not child.embedded:
-                        p = index.get((s, child.dvas[0].vdev, child.dvas[0].offset))
-                        if p is not None:
-                            votes[p] += 1
-                if not votes:
+            for bp, data in self.carved_at_level(level, known_locs):
+                words = child_words(data)
+                best, votes, total = idx.vote(words)
+                if best is None:
                     unplaced += 1
                     continue
-                if len(votes) > 1:
+                if votes < total:
                     ambiguous += 1
-                    best, n = max(votes.items(), key=lambda kv: kv[1])
-                    if n < 0.9 * sum(votes.values()):
+                    if votes < 0.9 * total:
                         continue
-                else:
-                    best = next(iter(votes))
                 cur[best].append(Cand(bp, True, f"carved@{bp.dvas[0].offset:#x}"))
-                reads[bp_key(bp)] = rd
+                reads[bp_key(bp)] = Summary.of(words, ReadStatus.OK) if last else BlockRead(ReadStatus.OK, data)
                 placed += 1
             self.stats.placed[level], self.stats.unplaced[level] = placed, unplaced
             self.stats.ambiguous[level] = ambiguous
             log.info("level %d: placed %d carved blocks (%d unplaceable, %d ambiguous)",
                      level, placed, unplaced, ambiguous)
+            del idx
 
-            if level == 1:
-                self._level1_reads = reads
+            if last:
+                self._level1 = reads
                 return cur, ref
 
             # --- expand to the next level
@@ -301,21 +316,15 @@ class VolumeReconstructor:
             span_next = 1 << (epb_shift * (level - 1))
             for pos, cands in cur.items():
                 for c in cands:
-                    rd = reads.get(bp_key(c.bp))
                     if c.bp.is_hole:
                         # a hole at this level covers every child position
-                        for s in range(epb):
-                            cp = pos * epb + s
-                            if cp * span_next > maxblkid:
-                                break
-                            k = bp_key(c.bp)
-                            if k not in nkeys[cp]:
-                                nkeys[cp].add(k)
-                                nxt[cp].append(Cand(c.bp, False, c.source))
-                        continue
-                    if not rd or not rd.data:
-                        continue
-                    for s, child in enumerate(blkptr.parse_array(rd.data)):
+                        children = [(s, c.bp) for s in range(epb)]
+                    else:
+                        rd = reads.get(bp_key(c.bp))
+                        if not rd or not rd.data:
+                            continue
+                        children = list(enumerate(blkptr.parse_array(rd.data)))
+                    for s, child in children:
                         cp = pos * epb + s
                         if cp * span_next > maxblkid:
                             break
@@ -329,43 +338,125 @@ class VolumeReconstructor:
         raise AssertionError("unreachable")
 
     def choose(self, spans: dict[int, list[Cand]], ref: Root) -> Iterable[tuple[int, int, int, bytes, bytes, bytes, int]]:
-        """For every span, order candidates newest-first and pick an initial choice per slot.
+        """For every span, order candidates newest-first and pick an initial choice per slot:
+        the child with the highest birth txg wins (ties go to the earlier, non-carved one).
 
         Yields (span, first_blkid, count, candidates_blob, choice, status, max_birth).
         """
-        nlevels, _, dblksz, ibs = ref.geometry
-        maxblkid = self.maxblkid
+        _, _, _, ibs = ref.geometry
         epb = 1 << (ibs - 7)
-        reads = self._level1_reads
+        summaries = self._level1
         for span in sorted(spans):
             cands = sorted(spans[span], key=lambda c: (-c.birth, c.carved))[:MAX_CANDIDATES]
             first = span * epb
-            count = min(epb, maxblkid + 1 - first)
+            count = min(epb, self.maxblkid + 1 - first)
             if count <= 0:
                 continue
-            best_birth = [-1] * count
-            choice = bytearray([NO_CHOICE]) * count
-            status = bytearray([BlockStatus.NO_METADATA]) * count
-            max_birth = 0
+            births = np.full((len(cands), count), -1, dtype=np.int64)
+            kinds = np.zeros((len(cands), count), dtype=np.uint8)
             for ci, c in enumerate(cands):
                 if c.bp.is_hole:
-                    children = [c.bp] * count
-                else:
-                    rd = reads.get(bp_key(c.bp))
-                    if not rd or not rd.data:
-                        continue
-                    children = blkptr.parse_array(rd.data, count)
-                for s, ch in enumerate(children):
-                    b = ch.birth
-                    if b > best_birth[s]:
-                        best_birth[s] = b
-                        choice[s] = ci
-                        if ch.is_hole:
-                            status[s] = BlockStatus.DISCARDED if b else BlockStatus.HOLE
-                        elif ch.embedded:
-                            status[s] = BlockStatus.EMBEDDED
-                        else:
-                            status[s] = BlockStatus.UNKNOWN
-                        max_birth = max(max_birth, b)
+                    births[ci] = c.bp.birth
+                    kinds[ci] = KIND_HOLE
+                    continue
+                sm = summaries.get(bp_key(c.bp))
+                if isinstance(sm, Summary):
+                    births[ci] = sm.births[:count]
+                    kinds[ci] = sm.kinds[:count]
+            best = births.argmax(axis=0)
+            best_birth = births[best, np.arange(count)]
+            best_kind = kinds[best, np.arange(count)]
+            status = np.full(count, BlockStatus.UNKNOWN, dtype=np.uint8)
+            status[best_kind == KIND_EMBEDDED] = BlockStatus.EMBEDDED
+            status[(best_kind == KIND_HOLE) & (best_birth == 0)] = BlockStatus.HOLE
+            status[(best_kind == KIND_HOLE) & (best_birth > 0)] = BlockStatus.DISCARDED
+            none = best_birth < 0
+            status[none] = BlockStatus.NO_METADATA
+            choice = best.astype(np.uint8)
+            choice[none] = NO_CHOICE
             blob = b"".join(c.bp.raw + bytes([1 if c.carved else 0]) for c in cands)
-            yield span, first, count, blob, bytes(choice), bytes(status), max_birth
+            yield (span, first, count, blob, choice.tobytes(), status.tobytes(),
+                   int(best_birth.max()) if count else 0)
+
+
+# ---------------------------------------------------------------------- compact helpers
+
+KIND_HOLE, KIND_NORMAL, KIND_EMBEDDED = 0, 1, 2
+_M63 = np.uint64((1 << 63) - 1)
+
+
+def child_words(data: bytes) -> np.ndarray:
+    return np.frombuffer(data, dtype="<u8", count=len(data) // 8).reshape(-1, 16)
+
+
+@dataclass
+class Summary:
+    """What reconstruction needs to remember about an indirect block: per child slot, the
+    birth txg and whether it is a hole, a normal pointer or embedded data (about 5 KiB
+    instead of the 128 KiB block)."""
+    status: ReadStatus
+    births: np.ndarray
+    kinds: np.ndarray
+
+    @property
+    def data(self) -> None:          # duck-typing with BlockRead for status counting
+        return None
+
+    @classmethod
+    def of(cls, words: np.ndarray, status: ReadStatus) -> Summary:
+        prop = words[:, 6]
+        emb = ((prop >> np.uint64(39)) & np.uint64(1)).astype(bool)
+        hole = ~emb & (words[:, 0] == 0) & (words[:, 1] == 0)
+        kinds = np.where(emb, KIND_EMBEDDED, np.where(hole, KIND_HOLE, KIND_NORMAL)).astype(np.uint8)
+        return cls(status, words[:, 10].astype(np.uint32), kinds)
+
+
+class ChildIndex:
+    """Sorted index of (child DVA → slot, parent position) for placing orphan blocks."""
+
+    def __init__(self) -> None:
+        self._keys: list[np.ndarray] = []
+        self._slots: list[np.ndarray] = []
+        self._pos: list[np.ndarray] = []
+
+    @staticmethod
+    def _dva_keys(words: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+        prop = words[:, 6]
+        emb = ((prop >> np.uint64(39)) & np.uint64(1)).astype(bool)
+        normal = ~emb & ((words[:, 0] != 0) | (words[:, 1] != 0))
+        slots = np.nonzero(normal)[0]
+        keys = ((words[slots, 0] >> np.uint64(32)) << np.uint64(56)) | ((words[slots, 1] & _M63) << np.uint64(9))
+        return keys, slots
+
+    def add(self, words: np.ndarray, pos: int) -> None:
+        keys, slots = self._dva_keys(words)
+        self._keys.append(keys)
+        self._slots.append(slots.astype(np.uint16))
+        self._pos.append(np.full(len(keys), pos, dtype=np.int64))
+
+    def freeze(self) -> None:
+        if self._keys:
+            k = np.concatenate(self._keys)
+            order = np.argsort(k, kind="stable")
+            self.keys = k[order]
+            self.slots = np.concatenate(self._slots)[order]
+            self.pos = np.concatenate(self._pos)[order]
+        else:
+            self.keys = np.zeros(0, np.uint64)
+            self.slots = np.zeros(0, np.uint16)
+            self.pos = np.zeros(0, np.int64)
+        self._keys = self._slots = self._pos = []
+
+    def vote(self, words: np.ndarray) -> tuple[int | None, int, int]:
+        """Return (best position, votes for it, total votes) for a block's children."""
+        keys, slots = self._dva_keys(words)
+        if not len(keys) or not len(self.keys):
+            return None, 0, 0
+        i = np.searchsorted(self.keys, keys)
+        i = np.minimum(i, len(self.keys) - 1)
+        hit = (self.keys[i] == keys) & (self.slots[i] == slots)
+        if not hit.any():
+            return None, 0, 0
+        vals, counts = np.unique(self.pos[i[hit]], return_counts=True)
+        j = int(counts.argmax())
+        return int(vals[j]), int(counts[j]), int(counts.sum())
