@@ -237,9 +237,12 @@ CREATE TABLE IF NOT EXISTS partitions (
     coverage    REAL                       -- fraction of bytes recoverable
 );
 
+-- A filesystem lives either inside a volume (volume_id; e.g. ext4 in a zvol) or is a ZFS
+-- filesystem dataset itself (dataset_id; plugin 'zpl').
 CREATE TABLE IF NOT EXISTS filesystems (
     id           INTEGER PRIMARY KEY,
-    volume_id    INTEGER NOT NULL REFERENCES volumes(id),
+    volume_id    INTEGER REFERENCES volumes(id),
+    dataset_id   INTEGER REFERENCES datasets(id),
     partition_id INTEGER REFERENCES partitions(id),
     start        INTEGER NOT NULL,         -- byte offset within the volume
     length       INTEGER NOT NULL,

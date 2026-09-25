@@ -250,7 +250,10 @@ class Extractor:
         fs = self.db.execute("SELECT * FROM filesystems WHERE id=?", (fs_id,)).fetchone()
         if fs is None:
             raise KeyError(f"no filesystem {fs_id}")
-        lv = LogicalVolume(self.pool, self.db, fs["volume_id"])
+        if fs["dataset_id"]:
+            src_reader = self._zpl(fs)
+        else:
+            src_reader = LogicalVolume(self.pool, self.db, fs["volume_id"])
         root = self.out / f"fs{fs_id}-{fs['fstype']}{'-' + safe_name(fs['label']) if fs['label'] else ''}"
         rows = self.db.execute("SELECT * FROM fs_entries WHERE fs_id=? ORDER BY path", (fs_id,)).fetchall()
         sel = []
@@ -275,7 +278,10 @@ class Extractor:
                     target.mkdir(parents=True, exist_ok=True)
                     dirs_meta.append((target, r))
                 elif r["type"] == "file":
-                    self._extract_file(lv, r, target)
+                    if fs["dataset_id"]:
+                        self._extract_zpl_file(src_reader, r, target)
+                    else:
+                        self._extract_file(src_reader, r, target)
                 elif r["type"] == "symlink":
                     self._extract_symlink(r, target)
             except FileExistsError as exc:
@@ -333,6 +339,32 @@ class Extractor:
             if x.kind == "inline":
                 return x.inline
         return None
+
+    def _zpl(self, fs):
+        from ..zfs import blkptr
+        from ..zfs.objset import Objset
+        from ..zfs.zpl import ZplFilesystem
+        ds = self.db.execute("SELECT * FROM datasets WHERE id=?", (fs["dataset_id"],)).fetchone()
+        return ZplFilesystem(Objset(self.pool.reader, blkptr.parse(ds["objset_bp"]), ds["name"]), ds["name"])
+
+    def _extract_zpl_file(self, zfs, r, target: Path) -> None:
+        size = r["size"] or 0
+        rec = OutputRecord(kind="file", path=str(target), source=r["path"], size=size, status="full",
+                           extra={"object": r["inode"], "mode": r["mode"], "uid": r["uid"], "gid": r["gid"],
+                                  "mtime": r["mtime"], "deleted": bool(r["deleted"])})
+        chunk = 8 << 20
+        with self._open_out(target, size) as f:
+            for off in range(0, size, chunk):
+                data, gaps = zfs.read_object(r["inode"], off, min(chunk, size - off))
+                if any(data):
+                    f.seek(off)
+                    f.write(data)
+                for g in gaps:
+                    self._add_gap(rec, g.offset, g.length, DESCRIPTIONS[g.status])
+            for g in rec.gaps:
+                self._fill(f, g.offset, g.length)
+        self._finish(rec, target, image=False)
+        _set_times(target, r)
 
     def _extract_symlink(self, r, target: Path) -> None:
         link = r["link_target"] or ""

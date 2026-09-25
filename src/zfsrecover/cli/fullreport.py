@@ -97,14 +97,21 @@ def write_report(db: MapDB, out_md: Path, csv_path: Path | None = None, max_item
         for fs in db.execute("SELECT * FROM filesystems WHERE volume_id=?", (v["id"],)):
             _fs_section(db, fs, cov, w, max_items)
 
+    zpl = db.execute("SELECT * FROM filesystems WHERE dataset_id IS NOT NULL").fetchall()
+    if zpl:
+        w("## ZFS filesystem datasets\n")
+        for fs in zpl:
+            _fs_section(db, fs, None, w, max_items)
+
     out_md.write_text("\n".join(L) + "\n", encoding="utf-8")
     if csv_path:
         _write_csv(db, csv_path)
 
 
-def _fs_section(db: MapDB, fs, cov: Coverage, w, max_items: int) -> None:
+def _fs_section(db: MapDB, fs, cov: Coverage | None, w, max_items: int) -> None:
     info = json.loads(fs["info_json"] or "{}")
-    w(f"### Filesystem {fs['id']}: {fs['fstype']} at volume offset {fs['start']:#x}\n")
+    where = f"dataset {fs['label']}" if fs["dataset_id"] else f"volume offset {fs['start']:#x}"
+    w(f"### Filesystem {fs['id']}: {fs['fstype']} ({where})\n")
     w(f"UUID `{fs['uuid']}`, label `{fs['label'] or ''}`, state **{fs['state']}**.")
     for warn in info.get("warnings", []):
         w(f"\n> ⚠ {warn}")
@@ -150,10 +157,13 @@ def _fs_section(db: MapDB, fs, cov: Coverage, w, max_items: int) -> None:
         w("")
 
 
-def _file_lost_ranges(db: MapDB, cov: Coverage, entry_id: int) -> list[tuple[int, int, str]]:
+def _file_lost_ranges(db: MapDB, cov: Coverage | None, entry_id: int) -> list[tuple[int, int, str]]:
     out = []
     for x in db.execute("SELECT * FROM fs_extents WHERE entry_id=? AND status!='ok' AND kind='data' "
                         "ORDER BY file_offset", (entry_id,)):
+        if x["volume_offset"] is None or cov is None:      # ZPL file: the gap itself is stored
+            out.append((x["file_offset"], x["length"], x["status"]))
+            continue
         for a, n, st in cov.lost_ranges(x["volume_offset"], x["length"]):
             out.append((x["file_offset"] + (a - x["volume_offset"]), n, st))
     return out

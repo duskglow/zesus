@@ -406,7 +406,94 @@ def phase_contents(ctx: ScanContext) -> bool:
         if complete:
             with ctx.db.tx():
                 ctx.db.mark("contents", unit)
+    if not inventory_zpl_datasets(ctx):
+        complete = False
     return complete
+
+
+def inventory_zpl_datasets(ctx: ScanContext) -> bool:
+    """File inventories of ZFS filesystem datasets (live, historical, destroyed-but-reachable),
+    plus snapshots when --snapshots is given. Every data block of every file is verified."""
+    from ..zfs import blkptr
+    from ..zfs.zpl import ZplFilesystem
+    kinds = ("filesystem", "snapshot") if ctx.options.get("snapshots") else ("filesystem",)
+    ok = True
+    for pool in ctx.pools:
+        pid = ctx.pool_ids[pool.guid]
+        rows = ctx.db.execute(f"SELECT * FROM datasets WHERE pool_id=? AND objset_bp IS NOT NULL AND kind IN "
+                              f"({','.join('?' * len(kinds))})", (pid, *kinds)).fetchall()
+        for ds in rows:
+            unit = f"dataset:{ds['id']}"
+            if ctx.db.is_done("contents", unit):
+                continue
+            with ctx.db.tx():
+                for fid, in ctx.db.execute("SELECT id FROM filesystems WHERE dataset_id=?", (ds["id"],)).fetchall():
+                    ctx.db.execute("DELETE FROM fs_extents WHERE entry_id IN (SELECT id FROM fs_entries WHERE fs_id=?)",
+                                   (fid,))
+                    ctx.db.execute("DELETE FROM fs_entries WHERE fs_id=?", (fid,))
+                    ctx.db.execute("DELETE FROM unrecoverable WHERE scope='filesystem' AND ref_id=?", (fid,))
+                    ctx.db.execute("DELETE FROM filesystems WHERE id=?", (fid,))
+            try:
+                os_ = Objset(pool.reader, blkptr.parse(ds["objset_bp"]), ds["name"])
+                if os_.type != 2:
+                    continue
+                fs = ZplFilesystem(os_, ds["name"])
+            except Exception as exc:
+                log.warning("dataset %s: cannot open as a ZFS filesystem: %s", ds["name"], exc)
+                continue
+            log.info("dataset %s (%s): building file inventory", ds["name"], ds["status"])
+            with ctx.db.tx():
+                fs_id = ctx.db.insert("filesystems", {
+                    "volume_id": None, "dataset_id": ds["id"], "start": 0, "length": 0, "fstype": "zfs",
+                    "plugin": "zpl", "label": ds["name"], "uuid": ds["guid"], "block_size": None,
+                    "state": "inventorying",
+                    "info_json": j({"details": {"zpl_version": fs.master.get("VERSION")}, "warnings": []})})
+            counts = {"full": 0, "partial": 0, "none": 0, "n/a": 0}
+            cur = ctx.db.conn.cursor()
+            n = 0
+            try:
+                for e in fs.iter_entries():
+                    gaps = []
+                    if e.type == "file" and e.size:
+                        lost, gaps = fs.check_object(e.inode, e.size)
+                        status = "full" if not lost else ("none" if lost >= e.size else "partial")
+                    elif e.type in ("file", "dir", "symlink"):
+                        lost, status = 0, "full"
+                    else:
+                        lost, status = 0, "n/a"
+                    counts[status] += 1
+                    cur.execute(
+                        "INSERT INTO fs_entries(fs_id,inode,parent_inode,name,path,type,size,mode,uid,gid,atime,mtime,"
+                        "ctime,crtime,deleted,status,recoverable_bytes,link_target,extra_json) "
+                        "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                        (fs_id, e.inode, e.parent_inode, e.name, e.path, e.type, e.size, e.mode, e.uid, e.gid,
+                         e.atime, e.mtime, e.ctime, e.crtime, int(e.deleted), status,
+                         (e.size or 0) - lost if e.type == "file" else None, e.link_target,
+                         j(e.extra) if e.extra else None))
+                    eid = cur.lastrowid
+                    for g in gaps:
+                        cur.execute("INSERT OR REPLACE INTO fs_extents(entry_id,file_offset,length,volume_offset,kind,"
+                                    "status) VALUES(?,?,?,?,?,?)",
+                                    (eid, g.offset, g.length, None, "data", g.status.name.lower()))
+                    n += 1
+                    if n % 20000 == 0:
+                        ctx.db.commit()
+                        log.info("  %s: %d entries %s", ds["name"], n, counts)
+                with ctx.db.tx():
+                    for where, what in fs.problems()[:10000]:
+                        ctx.db.insert("unrecoverable", {"scope": "filesystem", "ref_id": fs_id, "reason": what,
+                                                        "detail": where})
+                    ctx.db.execute("UPDATE filesystems SET state='inventoried', info_json=? WHERE id=?",
+                                   (j({"details": {"zpl_version": fs.master.get("VERSION")}, "counts": counts,
+                                       "problems": len(fs.problems())}), fs_id))
+                    ctx.db.mark("contents", unit)
+                log.info("dataset %s inventory complete: %d entries %s; %d problems", ds["name"], n, counts,
+                         len(fs.problems()))
+            except Exception as exc:
+                ctx.db.commit()
+                log.exception("dataset %s: inventory failed: %s", ds["name"], exc)
+                ok = False
+    return ok
 
 
 def inventory_fs(ctx: ScanContext, vid: int, part_id, start: int, length: int, dev, plugin, cov) -> None:

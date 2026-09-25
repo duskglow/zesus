@@ -75,6 +75,12 @@ def print_list(db, out=sys.stdout) -> None:
             c = ", ".join(f"{s}={n}" for s, n in counts)
             w(f"  filesystem {f['id']}: {f['fstype']} at {f['start']:#x} uuid={f['uuid']} label={f['label']!r} "
               f"state={f['state']}{'  files: ' + c if c else ''}\n")
+    for f in db.execute("SELECT f.*, d.status AS ds_status FROM filesystems f JOIN datasets d ON d.id=f.dataset_id"):
+        counts = db.execute("SELECT status, count(*) FROM fs_entries WHERE fs_id=? AND type='file' "
+                            "GROUP BY status", (f["id"],)).fetchall()
+        c = ", ".join(f"{s}={n}" for s, n in counts)
+        w(f"filesystem {f['id']}: ZFS dataset {f['label']} ({f['ds_status']}) state={f['state']}"
+          f"{'  files: ' + c if c else '  (no files)'}\n")
 
 
 def cmd_extract(args: argparse.Namespace) -> int:

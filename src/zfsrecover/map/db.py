@@ -48,10 +48,40 @@ class MapDB:
                 raise RuntimeError(f"map {self.path} has schema v{v}; this tool expects v{SCHEMA_VERSION}")
         sql = resources.files("zfsrecover.map").joinpath("schema.sql").read_text(encoding="utf-8")
         self.conn.executescript(sql)
+        self._migrate()
         if not exists:
             self.set_meta("schema_version", str(SCHEMA_VERSION))
             self.set_meta("created_at", now())
         self.conn.commit()
+
+    def _migrate(self) -> None:
+        """In-place upgrades for maps created by earlier development versions."""
+        cols = {r[1]: r for r in self.conn.execute("PRAGMA table_info(filesystems)")}
+        if "dataset_id" not in cols or cols["volume_id"][3]:          # [3] = notnull
+            log.info("migrating map: filesystems table gains dataset_id, volume_id becomes nullable")
+            # Standard SQLite table rebuild: build the new table, copy, drop, rename. With
+            # legacy_alter_table the final rename does not rewrite other tables' foreign keys.
+            self.conn.executescript("""
+                PRAGMA foreign_keys=OFF;
+                PRAGMA legacy_alter_table=ON;
+                CREATE TABLE filesystems_new (
+                    id INTEGER PRIMARY KEY, volume_id INTEGER REFERENCES volumes(id),
+                    dataset_id INTEGER REFERENCES datasets(id), partition_id INTEGER REFERENCES partitions(id),
+                    start INTEGER NOT NULL, length INTEGER NOT NULL, fstype TEXT NOT NULL, plugin TEXT,
+                    label TEXT, uuid TEXT, block_size INTEGER, state TEXT, info_json TEXT);
+                INSERT INTO filesystems_new(id,volume_id,partition_id,start,length,fstype,plugin,label,uuid,
+                                            block_size,state,info_json)
+                    SELECT id,volume_id,partition_id,start,length,fstype,plugin,label,uuid,block_size,state,info_json
+                    FROM filesystems;
+                DROP TABLE filesystems;
+                ALTER TABLE filesystems_new RENAME TO filesystems;
+                PRAGMA legacy_alter_table=OFF;
+                PRAGMA foreign_keys=ON;
+            """)
+            bad = self.conn.execute("SELECT name FROM sqlite_master WHERE instr(sql, 'filesystems_old') OR instr(sql, 'filesystems_new')").fetchall()
+            if bad:
+                raise RuntimeError(f"map migration left dangling references in {bad}")
+        self.conn.execute("DROP TABLE IF EXISTS volume_blocks")
 
     # -- meta / progress ----------------------------------------------------------
     def get_meta(self, key: str) -> str | None:
