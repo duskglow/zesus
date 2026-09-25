@@ -125,15 +125,16 @@ class BlockReader:
                 continue
             if not copies:
                 notes.append(f"{dva}: beyond end of device or no device")
+            top_paths = len(copies)
             for path, raw in copies:
                 status = self._verify(bp, raw)
                 if status is ReadStatus.CHECKSUM_MISMATCH:
                     if any(raw):
                         saw_mismatch = True
-                        notes.append(f"{dva}@{path}: checksum mismatch (overwritten?)")
+                        notes.append(f"{dva}{_copy(path, top_paths)}: checksum mismatch (overwritten?)")
                     else:
                         saw_zero = True
-                        notes.append(f"{dva}@{path}: reads as zeros (freed and trimmed?)")
+                        notes.append(f"{dva}{_copy(path, top_paths)}: reads as zeros (freed and trimmed?)")
                     if verify:
                         continue
                 if not decompress:
@@ -141,7 +142,7 @@ class BlockReader:
                 try:
                     data = compress.decompress(bp.comp, raw, bp.lsize)
                 except (DecompressionError, Unsupported) as exc:
-                    notes.append(f"{dva}@{path}: {exc}")
+                    notes.append(f"{dva}{_copy(path, top_paths)}: {exc}")
                     if status is ReadStatus.OK:
                         return BlockRead(ReadStatus.DECOMPRESS_FAILED, None, dva, notes)
                     continue
@@ -193,6 +194,11 @@ class BlockReader:
                 raise CorruptStructure(f"gang member {i} unreadable ({r.status.value})")
             parts.append(r.data[: child.psize])
         return [(path, b"".join(parts)[: bp.psize])]
+
+
+def _copy(path: str, ncopies: int) -> str:
+    """Name the mirror child in a note only when there is more than one."""
+    return f"@{path}" if ncopies > 1 else ""
 
 
 def u64s(data: bytes, count: int | None = None, bo: str = "<") -> tuple[int, ...]:

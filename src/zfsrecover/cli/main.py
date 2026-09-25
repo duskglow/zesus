@@ -17,7 +17,7 @@ from .. import log as logsetup
 
 log = logging.getLogger("zfsrecover")
 
-DEFAULT_PHASES = ["history", "datasets", "carve", "reconstruct", "contents"]
+DEFAULT_PHASES = ["history", "datasets", "carve", "reconstruct", "verify", "contents"]
 
 
 def _size(s: str) -> int:
@@ -37,6 +37,8 @@ def add_scan_args(p: argparse.ArgumentParser) -> None:
     p.add_argument("--chunk-size", type=_size, default=64 << 20, help="carving chunk size (default 64M)")
     p.add_argument("--carve-start", type=_size, default=None, help="carve from this DVA offset")
     p.add_argument("--carve-end", type=_size, default=None, help="carve up to this DVA offset")
+    p.add_argument("--limit-blocks", type=int, default=None,
+                   help="(testing) only reconstruct the first N logical blocks of each volume")
     p.add_argument("--progress-interval", type=float, default=30, help="seconds between progress lines")
 
 
@@ -55,7 +57,7 @@ def cmd_scan(args: argparse.Namespace) -> int:
     stop.install()
     ctx = pipeline.ScanContext(db=db, source=src, stop=stop, options={
         "chunk_size": args.chunk_size, "carve_start": args.carve_start, "carve_end": args.carve_end,
-        "progress_interval": args.progress_interval,
+        "progress_interval": args.progress_interval, "limit_blocks": args.limit_blocks,
         "redo": {x for x in args.redo.split(",") if x}})
     for name in ctx.options["redo"]:
         db.reset_phase(name)

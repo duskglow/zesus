@@ -117,6 +117,16 @@ CREATE TABLE IF NOT EXISTS datasets (
 );
 CREATE INDEX IF NOT EXISTS datasets_dsobj ON datasets(pool_id, dsobj);
 
+-- Every distinct objset root pointer seen for a dataset (one per ring uberblock that
+-- could still read it). Reconstruction merges all of them.
+CREATE TABLE IF NOT EXISTS dataset_roots (
+    dataset_id  INTEGER NOT NULL REFERENCES datasets(id),
+    seen_txg    INTEGER NOT NULL,          -- uberblock txg it was read through
+    bp_birth    INTEGER NOT NULL,
+    objset_bp   BLOB NOT NULL,
+    PRIMARY KEY (dataset_id, bp_birth)
+);
+
 CREATE TABLE IF NOT EXISTS history_records (
     id        INTEGER PRIMARY KEY,
     pool_id   INTEGER NOT NULL REFERENCES pools(id),
@@ -173,16 +183,33 @@ CREATE TABLE IF NOT EXISTS volumes (
     notes         TEXT
 );
 
--- One row per L1-sized span (a run of up to 1024 L0 slots). Each entry in the packed BLOB
--- is 48 bytes: <vdev u32, flags u32, dva_offset u64, psize u32, lsize u32, comp u8,
--- cksum_type u8, status u8, pad u8, pad u32, birth u64, cksum0 u64>. The full checksum is
--- re-derived at extraction by re-reading the parent. Statuses are in zfsrecover.map.codes.
-CREATE TABLE IF NOT EXISTS volume_blocks (
+-- Every version ("root") of a volume's block tree that reconstruction used.
+CREATE TABLE IF NOT EXISTS volume_roots (
+    id          INTEGER PRIMARY KEY,
     volume_id   INTEGER NOT NULL REFERENCES volumes(id),
+    txg         INTEGER NOT NULL,           -- birth of the top-level block pointer
+    top_bp      BLOB NOT NULL,              -- raw 128-byte blkptr of the top indirect block
+    provenance  TEXT NOT NULL,              -- e.g. 'ring-mos:113959', 'carved-objset@0x...'
+    usable      INTEGER NOT NULL
+);
+
+-- One row per L1 span (up to 2^(indblkshift-7) consecutive logical blocks). Rather than
+-- one row per 16K block, the map keeps the level-1 indirect blocks that describe the span.
+-- Every L0 location, size and checksum is derived from them and verified on read.
+--   candidates  n x 129 bytes: raw 128-byte blkptr of an L1 block + 1 provenance byte
+--               (0 = pointed to by a verified parent, 1 = carved and placed by matching)
+--   choice      one byte per slot: index of the candidate supplying that slot (255 = none)
+--   status      one byte per slot: zfsrecover.map.codes.BlockStatus
+CREATE TABLE IF NOT EXISTS volume_spans (
+    volume_id   INTEGER NOT NULL REFERENCES volumes(id),
+    span        INTEGER NOT NULL,
     first_blkid INTEGER NOT NULL,
     count       INTEGER NOT NULL,
-    entries     BLOB NOT NULL,
-    PRIMARY KEY (volume_id, first_blkid)
+    candidates  BLOB NOT NULL,
+    choice      BLOB NOT NULL,
+    status      BLOB NOT NULL,
+    max_birth   INTEGER,
+    PRIMARY KEY (volume_id, span)
 );
 
 -- Run-length summary of volume status for fast display and gap reporting.

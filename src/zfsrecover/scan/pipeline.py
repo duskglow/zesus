@@ -104,7 +104,7 @@ def run(ctx: ScanContext, phases: list[str]) -> None:
             log.warning("stopped during phase %s", name)
             return
         if complete is False:
-            log.info("phase %s ran on a partial range; not marking it complete", name)
+            log.info("phase %s did not complete (partial range or errors); it will resume on the next run", name)
             continue
         with ctx.db.tx():
             ctx.db.mark(name, "*")

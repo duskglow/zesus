@@ -152,3 +152,16 @@ def parse_array(buf: bytes | memoryview, count: int | None = None, byteorder: st
 
 def is_all_zero(raw: bytes) -> bool:
     return not any(raw)
+
+
+def build(*, vdev: int, offset: int, asize: int, psize: int, lsize: int, comp: int,
+          cksum_type: int, type: int, level: int, birth: int,
+          cksum: tuple[int, int, int, int], fill: int = 1) -> BlockPointer:
+    """Build a synthetic little-endian BP, e.g. to describe a carved block with no known parent."""
+    w0 = (vdev << 32) | ((asize >> 9) & 0xFFFFFF)
+    w1 = (offset >> 9) & ((1 << 63) - 1)
+    prop = (((lsize >> 9) - 1) & 0xFFFF) | ((((psize >> 9) - 1) & 0xFFFF) << 16) \
+        | ((comp & 0x7F) << 32) | ((cksum_type & 0xFF) << 40) | ((type & 0xFF) << 48) \
+        | ((level & 0x1F) << 56) | (1 << 63)
+    raw = struct.pack("<16Q", w0, w1, 0, 0, 0, 0, prop, 0, 0, 0, birth, fill, *cksum)
+    return parse(raw)
