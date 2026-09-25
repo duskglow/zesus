@@ -6,6 +6,7 @@ import datetime as _dt
 import json
 import logging
 import sqlite3
+import time
 from contextlib import contextmanager
 from importlib import resources
 from pathlib import Path
@@ -31,8 +32,17 @@ class MapDB:
             self.conn = sqlite3.connect(uri, uri=True, check_same_thread=False)
         else:
             self.path.parent.mkdir(parents=True, exist_ok=True)
-            self.conn = sqlite3.connect(self.path, check_same_thread=False)
-            self.conn.execute("PRAGMA journal_mode=WAL")
+            # A just-killed scan can hold file handles for a moment (notably on Windows).
+            for attempt in range(10):
+                try:
+                    self.conn = sqlite3.connect(self.path, check_same_thread=False, timeout=30)
+                    self.conn.execute("PRAGMA journal_mode=WAL")
+                    break
+                except sqlite3.OperationalError as exc:
+                    if attempt == 9:
+                        raise RuntimeError(f"cannot open map {self.path}: {exc}. Is another scan still "
+                                           "running on it?") from exc
+                    time.sleep(1)
             self.conn.execute("PRAGMA synchronous=NORMAL")
         self.conn.row_factory = sqlite3.Row
         self.conn.execute("PRAGMA foreign_keys=ON")
