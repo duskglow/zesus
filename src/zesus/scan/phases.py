@@ -93,6 +93,17 @@ def phase_datasets(ctx: ScanContext) -> None:
     for pool in ctx.pools:
         pid = ctx.pool_ids[pool.guid]
         with ctx.db.tx():
+            # everything derived from datasets (volumes, their contents, dataset filesystems)
+            # is rebuilt by later phases
+            for vid, in ctx.db.execute("SELECT v.id FROM volumes v JOIN datasets d ON v.dataset_id=d.id "
+                                       "WHERE d.pool_id=?", (pid,)).fetchall():
+                _drop_volume(ctx, vid)
+            for fid, in ctx.db.execute("SELECT f.id FROM filesystems f JOIN datasets d ON f.dataset_id=d.id "
+                                       "WHERE d.pool_id=?", (pid,)).fetchall():
+                ctx.db.execute("DELETE FROM fs_extents WHERE entry_id IN (SELECT id FROM fs_entries WHERE fs_id=?)",
+                               (fid,))
+                ctx.db.execute("DELETE FROM fs_entries WHERE fs_id=?", (fid,))
+                ctx.db.execute("DELETE FROM filesystems WHERE id=?", (fid,))
             ctx.db.execute("DELETE FROM dataset_roots WHERE dataset_id IN "
                            "(SELECT id FROM datasets WHERE pool_id=? AND origin!='history_log')", (pid,))
             ctx.db.execute("DELETE FROM datasets WHERE pool_id=? AND origin!='history_log'", (pid,))

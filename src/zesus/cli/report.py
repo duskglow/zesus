@@ -45,8 +45,20 @@ def print_info(db: MapDB, out: TextIO) -> None:
         if n:
             def pct(x: int | None, n: int = n) -> str:
                 return f"{100 * (x or 0) / n:.2f}%"
-            w(f"  blocks: {n}  verified={v['n_verified']} ({pct(v['n_verified'])})  "
-              f"holes/unwritten={v['n_holes']} ({pct(v['n_holes'])})  stale={v['n_stale']}  "
-              f"missing={v['n_missing']}  damaged={v['n_damaged']}\n")
+            by = dict(db.execute("SELECT status, sum(count) FROM volume_coverage WHERE volume_id=? GROUP BY status",
+                                 (v["id"],)).fetchall())
+            ok = by.get("ok", 0) + by.get("embedded", 0)
+            stale = by.get("ok_stale", 0)
+            holes = by.get("hole", 0) + by.get("discarded", 0)
+            unver = by.get("unknown", 0)
+            lost = sum(c for s, c in by.items() if s not in ("ok", "embedded", "ok_stale", "hole", "discarded",
+                                                            "unknown"))
+            w(f"  blocks: {n}  verified={ok} ({pct(ok)})  older-generation={stale}  "
+              f"never-written={holes} ({pct(holes)})  lost={lost} ({pct(lost)})\n")
+            if unver:
+                w(f"  {unver} blocks ({pct(unver)}) are mapped but not yet checksum-verified: run the 'verify' phase\n")
+            for s, c in sorted(by.items(), key=lambda kv: -kv[1]):
+                if s not in ("ok", "embedded", "ok_stale", "hole", "discarded", "unknown"):
+                    w(f"    lost: {c} blocks ({c * (v['volblocksize'] or 0) / 2**20:.1f} MiB) {s}\n")
     phases = db.execute("SELECT phase, count(*) FROM progress WHERE state='done' GROUP BY phase").fetchall()
     w("Progress: " + ", ".join(f"{ph}={n}" for ph, n in phases) + "\n")
