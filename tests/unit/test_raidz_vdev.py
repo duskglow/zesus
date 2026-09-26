@@ -207,3 +207,15 @@ def test_carving_finds_every_block_exactly_once(N, p, ashift, missing, seed):
         h = found[off]
         assert h.kind == "indirect" and h.psize >= bp.psize
         assert h.virtual == (h.member in missing)
+
+
+def test_windows_cover_raidz_extents_and_accept_empty_worklists():
+    import numpy as np
+
+    from zesus.carve.verify import windows
+    assert list(windows({"blkid": np.zeros(0, np.int64)})) == []
+    wl = {"blkid": np.arange(3), "vdev": np.zeros(3, np.uint32),
+          "offset": np.array([0, 8192, 1 << 30], np.uint64), "psize": np.array([4096, 4096, 4096], np.int32),
+          "extent": np.array([8192, 8192, 8192], np.int64)}
+    got = [(w[2], w[3]) for w in windows(wl)]
+    assert got == [(0, 16384), (1 << 30, (1 << 30) + 8192)]

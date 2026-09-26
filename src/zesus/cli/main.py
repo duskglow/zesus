@@ -47,22 +47,44 @@ def add_scan_args(p: argparse.ArgumentParser) -> None:
                    help="(validation) reconstruct volumes from carved blocks only, as if every "
                         "uberblock had lost track of them")
     p.add_argument("--progress-interval", type=float, default=30, help="seconds between progress lines")
+    add_parallel_args(p)
+
+
+def add_parallel_args(p: argparse.ArgumentParser) -> None:
+    p.add_argument("--workers", type=int, default=None,
+                   help="threads for CPU-bound work (checksums, decompression, parity); "
+                        "default: CPU count - 1, at most 8")
+    p.add_argument("--io-depth", type=int, default=None,
+                   help="reads in flight per stage (default 1: sequential, best for spinning disks "
+                        "and network shares; 2-4 can help on SSD/NVMe)")
+
+
+def apply_parallel_args(args: argparse.Namespace, paths) -> None:
+    from ..parallel import configure, describe_io
+    configure(getattr(args, "workers", None), getattr(args, "io_depth", None))
+    describe_io(paths)
 
 
 def cmd_scan(args: argparse.Namespace) -> int:
     from ..carve.scanner import Stop
     from ..io.sourceset import SourceSet
     from ..map.db import MapDB
+    from ..progress import MapPublisher, Progress, cli_logger
     from ..scan import pipeline
 
     mappath = Path(args.map)
     logsetup.setup(args.verbose, args.log or mappath.with_suffix(".log.jsonl"))
     log.info("zesus %s: scan %s -> %s", __version__, " ".join(args.source), mappath)
     src = SourceSet.open(args.source)
+    apply_parallel_args(args, [m.name for m in src])
     db = MapDB(mappath)
     stop = Stop()
     stop.install()
-    ctx = pipeline.ScanContext(db=db, source=src, stop=stop, options={
+    prog = Progress("scan")
+    prog.listen(cli_logger(log), args.progress_interval)
+    publisher = MapPublisher(mappath)
+    prog.listen(publisher, 2.0)
+    ctx = pipeline.ScanContext(db=db, source=src, stop=stop, progress=prog, options={
         "chunk_size": args.chunk_size, "carve_start": args.carve_start, "carve_end": args.carve_end,
         "progress_interval": args.progress_interval, "limit_blocks": args.limit_blocks, "ignore_ring": args.ignore_ring, "snapshots": args.snapshots,
         "redo": {x for x in args.redo.split(",") if x}})
@@ -70,9 +92,13 @@ def cmd_scan(args: argparse.Namespace) -> int:
         db.reset_phase(name)
     db.commit()
     phases = [x for x in args.phases.split(",") if x]
+    state = "failed"
     try:
         pipeline.run(ctx, phases)
+        state = "stopped" if stop.event.is_set() else "done"
     finally:
+        prog.finish(state)
+        publisher.close()
         db.commit()
         db.close()
         src.close()

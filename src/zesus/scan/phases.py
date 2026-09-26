@@ -178,7 +178,7 @@ def phase_carve(ctx: ScanContext) -> bool:
     healthiest child (every child holds the same blocks). RAIDZ is carved by row ranges
     across its member disks (see :mod:`zesus.carve.raidz_carve`).
     """
-    from ..carve.raidz_carve import run_raidz_carve
+    from ..carve.raidz_carve import run_raidz_carve, top_spec
 
     opts = ctx.options
     partial = opts.get("carve_start") is not None or opts.get("carve_end") is not None
@@ -188,16 +188,15 @@ def phase_carve(ctx: ScanContext) -> bool:
                          vdev_asize=max(t.asize for t in pool.vdevs.top.values()),
                          max_txg=pool.max_txg)
         for top_id, top in sorted(pool.vdevs.top.items()):
-            last = [0.0]
+            prog = ctx.progress
+            c_lo = opts.get("carve_start") or 0
+            c_hi = min(opts.get("carve_end") or top.asize, top.asize)
+            if prog is not None:
+                prog.begin(f"carve vdev {top_id}", max(0, c_hi - c_lo), "bytes")
 
-            def progress(pos: int, end: int, st, rate: float, last=last, top_id=top_id) -> None:
-                import time
-                t = time.monotonic()
-                if t - last[0] >= opts.get("progress_interval", 30):
-                    last[0] = t
-                    eta = (end - pos) / rate if rate else 0
-                    log.info("carve vdev %d: %5.1f%%  %.0f MB/s  ETA %dm  (chunk: %d candidates, %d hits %s)",
-                             top_id, 100 * pos / end, rate / 1e6, eta // 60, st.candidates, st.hits, st.by_kind)
+            def progress(pos: int, end: int, st, rate: float, prog=prog, c_lo=c_lo) -> None:  # noqa: ARG001
+                if prog is not None:
+                    prog.set(max(0, pos - c_lo), message=f"{st.hits} hits in last chunk {st.by_kind or ''}")
 
             common = {"chunk_size": opts.get("chunk_size", 64 << 20), "start": opts.get("carve_start") or 0,
                       "end": opts.get("carve_end"), "stop": ctx.stop, "progress": progress}
@@ -210,7 +209,7 @@ def phase_carve(ctx: ScanContext) -> bool:
                 continue
             if top.type == "raidz":
                 im0 = next(im for im in pool.vdev_images if im.source is top.children[0].source)
-                ok = run_raidz_carve(ctx.db, pid, top, im0.base_offset, lim, **common)
+                ok = run_raidz_carve(ctx.db, pid, top, im0.base_offset, lim, spec=top_spec(pool, top), **common)
             else:
                 leaf = sorted(top.children, key=lambda lf: lf.errors)[0]
                 im = next(im for im in pool.vdev_images if im.source is leaf.source)
@@ -374,7 +373,7 @@ def phase_verify(ctx: ScanContext) -> bool:
     for vid, name in ctx.db.execute("SELECT id, name FROM volumes").fetchall():
         pool = ctx.pools[0]
         log.info("verifying volume %s", name)
-        Verifier(pool, ctx.db, vid, stop=ctx.stop).run()
+        Verifier(pool, ctx.db, vid, stop=ctx.stop, progress=ctx.progress).run()
         if ctx.stop is not None and ctx.stop.event.is_set():
             return False
     return True

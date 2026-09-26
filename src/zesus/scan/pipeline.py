@@ -23,6 +23,7 @@ class ScanContext:
     pool_ids: dict[int, int] = field(default_factory=dict)      # pool guid -> db id
     options: dict = field(default_factory=dict)
     stop: object | None = None
+    progress: object | None = None                               # zesus.progress.Progress
     source_ids: dict[str, int] = field(default_factory=dict)     # evidence path -> sources.id
     new_sources: list[tuple[int, str]] = field(default_factory=list)
 
@@ -181,6 +182,8 @@ def run(ctx: ScanContext, phases: list[str]) -> None:
             log.info("phase %s already complete; skipping", name)
             continue
         log.info("=== phase: %s", name)
+        if ctx.progress is not None:
+            ctx.progress.begin(name, 0, "steps")
         t0 = time.monotonic()
         # Re-running a phase invalidates everything derived from it. (Carving is additive
         # and resumes by chunk, so it only invalidates phases after it.)

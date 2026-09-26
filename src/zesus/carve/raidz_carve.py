@@ -38,16 +38,18 @@ import logging
 import time
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
 from dataclasses import dataclass
 
 import lz4.block
 import numpy as np
 
 from ..map.db import MapDB, j
+from ..parallel import SETTINGS, ordered_submit, prefetch
 from ..zfs import raidz
 from ..zfs.vdev import TopVdev, phys
 from .classify import Classified, PoolLimits, classify, classify_objset
-from .scanner import MAX_META_LSIZE, PHASE, ChunkStats, Stop, lz4_be, prefilter
+from .scanner import MAX_META_LSIZE, PHASE, ChunkStats, Stop, carve_executor, lz4_be, prefilter
 
 log = logging.getLogger(__name__)
 
@@ -80,11 +82,15 @@ class RaidzHit:
 class ChunkReader:
     """Row range [lo, hi) of every present child, plus one leading row and a tail."""
 
-    def __init__(self, top: TopVdev, lo: int, hi: int, pool: ThreadPoolExecutor | None = None) -> None:
+    def __init__(self, top: TopVdev, lo: int, hi: int, pool: ThreadPoolExecutor | None = None,
+                 bufs: dict[int, bytes] | None = None) -> None:
         self.top = top
         bs = 1 << top.ashift
         self.lo, self.hi = lo, hi
         self.buf_lo = max(0, lo - bs)
+        if bufs is not None:
+            self.bufs = bufs
+            return
         length = hi + TAIL - self.buf_lo
         present = [lf for lf in top.slots if lf is not None]
         reads = (pool.map if pool else map)(lambda lf: lf.read(self.buf_lo, length), present)
@@ -282,7 +288,8 @@ def _virtual(top: TopVdev, cr: ChunkReader, first: int, n_own: int, m: int,
 def run_raidz_carve(db: MapDB, pool_id: int, top: TopVdev, base_phys: int, lim: PoolLimits, *,
                     chunk_size: int = 64 << 20, start: int = 0, end: int | None = None,
                     stop: Stop | None = None,
-                    progress: Callable[[int, int, ChunkStats, float], None] | None = None) -> bool:
+                    progress: Callable[[int, int, ChunkStats, float], None] | None = None,
+                    spec: TopSpec | None = None) -> bool:
     """Carve RAIDZ DVA range [start, end) of *top*. Returns True if the range completed."""
     bs = 1 << top.ashift
     N = top.width
@@ -301,14 +308,22 @@ def run_raidz_carve(db: MapDB, pool_id: int, top: TopVdev, base_phys: int, lim: 
              len(offs) - len(remaining))
     t0 = time.monotonic()
     bytes_done = 0
-    with ThreadPoolExecutor(max_workers=max(1, mask.bit_count())) as ex:
-        for o in remaining:
+    # Members are read in parallel (separate disks), each sequentially, one chunk ahead.
+    # Chunks are classified in worker processes when --workers > 1, and committed in order.
+    with ThreadPoolExecutor(max_workers=max(1, mask.bit_count())) as readers, \
+            carve_executor(_init_worker, (spec,)) if spec is not None else _nullpool() as ex:
+        chunks = prefetch((ChunkReader(top, o, min(o + step, c_end), readers) for o in remaining),
+                          depth=SETTINGS.io_depth)
+        if ex is not None:
+            results = ordered_submit(ex, _rows_task, ((cr.lo, cr.hi, cr.bufs, lim) for cr in chunks),
+                                     SETTINGS.carve_workers + 1)
+        else:
+            results = ((cr.lo, cr.hi, *carve_rows(top, cr, lim), len(cr.bufs)) for cr in chunks)
+        for o, hi, hits, st, nbufs in results:
             if stop and stop.event.is_set():
                 log.warning("carving stopped by request; resume with the same command")
+                results.close()
                 return False
-            hi = min(o + step, c_end)
-            cr = ChunkReader(top, o, hi, ex)
-            hits, st = carve_rows(top, cr, lim)
             lo_dva, hi_dva = (o >> top.ashift) * N * bs - bs * N, ((hi >> top.ashift) + 1) * N * bs
             with db.tx():
                 have = {(r[0], r[1]) for r in db.execute(
@@ -330,8 +345,57 @@ def run_raidz_carve(db: MapDB, pool_id: int, top: TopVdev, base_phys: int, lim: 
                          c.min_birth, c.max_birth, c.os_type, j(info) if info else None, h.member))
                 db.mark(PHASE, f"{prefix}{o:x}:m{mask:x}",
                         detail=j({"hits": st.hits, "cand": st.candidates, "kinds": st.by_kind}))
-            bytes_done += (hi - o) * len(cr.bufs)
+            bytes_done += (hi - o) * nbufs
             if progress:
                 progress((hi >> top.ashift) * N * bs, end, st,
                          bytes_done / max(1e-9, time.monotonic() - t0))
     return True
+
+
+# ---------------------------------------------------------------- worker processes
+
+@dataclass
+class TopSpec:
+    """Enough to reopen a RAIDZ vdev in another process: its label config and, per
+    present member, (guid, evidence path, vdev offset in the file, vdev size)."""
+    tree: dict
+    members: list[tuple[int, str, int, int]]
+
+
+def top_spec(pool, top: TopVdev) -> TopSpec | None:
+    members = []
+    for im in pool.vdev_images:
+        if any(lf.guid == im.guid for lf in top.children):
+            members.append((im.guid, (im.evidence or im.source).name, im.base_offset, im.source.size))
+    tree = next(((im.config or {}).get("vdev_tree") for im in sorted(pool.vdev_images, key=lambda i: -i.max_txg)
+                 if (im.config or {}).get("vdev_tree", {}).get("id", 0) == top.id), None)
+    return TopSpec(tree, members) if tree else None
+
+
+_WORKER: dict = {}
+
+
+def _init_worker(spec: TopSpec) -> None:
+    """Runs in each worker process: reopen the members read-only (the write guard is
+    installed in this process too) and rebuild the vdev."""
+    from ..io.source import RawSource, SliceSource
+    from ..zfs.vdev import VdevMap
+    leaves = {}
+    for guid, path, base, size in spec.members:
+        src = RawSource(path)
+        leaves[guid] = SliceSource(src, base, size) if (base or size != src.size) else src
+    vm = VdevMap()
+    _WORKER["top"] = vm.add_top(spec.tree, leaves)
+
+
+def _rows_task(args) -> tuple:
+    lo, hi, bufs, lim = args
+    top = _WORKER["top"]
+    cr = ChunkReader(top, lo, hi, bufs=bufs)
+    hits, st = carve_rows(top, cr, lim)
+    return lo, hi, hits, st, len(bufs)
+
+
+@contextmanager
+def _nullpool():
+    yield None

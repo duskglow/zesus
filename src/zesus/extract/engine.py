@@ -17,7 +17,6 @@ import logging
 import os
 import re
 import sys
-import time
 from collections.abc import Iterable
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -29,6 +28,7 @@ from ..carve.verify import add_extents, chosen_blocks, load_spans, windows
 from ..io import guard
 from ..map.codes import DESCRIPTIONS, RECOVERED, BlockStatus
 from ..map.db import MapDB, now
+from ..parallel import SETTINGS, ordered_map, prefetch
 from ..volume.logical import LogicalVolume
 from ..zfs import compress
 from ..zfs.checksum import compute
@@ -77,8 +77,11 @@ class OutputRecord:
 
 
 class Extractor:
-    def __init__(self, db: MapDB, pool: Pool, opts: Options) -> None:
+    def __init__(self, db: MapDB, pool: Pool, opts: Options, *, progress=None, stop=None) -> None:
         self.db, self.pool, self.opts = db, pool, opts
+        self.progress = progress          # zesus.progress.Progress
+        self.stop = stop                  # threading.Event (or Stop): checked between windows/files
+        self.cancelled = False
         self.records: list[OutputRecord] = []
         self._fs_handles: dict = {}
         self.local_rel: dict[str, Path] = {}          # filesystem path -> path relative to the fs root
@@ -129,95 +132,152 @@ class Extractor:
         spans = load_spans(self.db, volume_id)
         wl = add_extents(self.pool, chosen_blocks(
             self.pool, spans, {BlockStatus.OK, BlockStatus.OK_STALE, BlockStatus.UNKNOWN},
-            blk_range=(lo, hi), label="extract"))
+            blk_range=(lo, hi), label="extract", stop=self.stop))
         n = len(wl["blkid"])
         written = np.zeros(hi - lo, dtype=bool)
-        t0 = last_log = time.monotonic()
         total = float(wl["psize"].sum()) if n else 0.0
-        done = 0
         lv = LogicalVolume(self.pool, self.db, volume_id)
         log.info("extracting %s → %s: %d data blocks (%.1f GiB on disk)", source_desc, path, n, total / (1 << 30))
+        if self.progress:
+            self.progress.begin(f"extract {out_name}", total, "bytes")
         with self._open_out(path, length) as f:
-            for sl, vdev, w0, w1 in windows(wl):
-                psz = wl["psize"][sl]
-                top = self.pool.vdevs.top.get(vdev)
-                buf, offs, avail = b"", np.zeros(len(psz), np.int64), np.zeros(len(psz), bool)
-                if top is not None and not top.unsupported:
-                    buf, offs, avail = top.read_window(w0, w1).gather(wl["offset"][sl], psz)
-                ctype = wl["ctype"][sl]
-                ok = np.zeros(len(offs), dtype=bool)
-                f4 = (ctype == ChecksumType.FLETCHER_4) & ~wl["gang"][sl] & avail
-                if f4.any():
-                    ok[f4] = (fletcher4_many(buf, offs[f4], psz[f4]) == wl["cksum"][sl][f4]).all(axis=1)
-                for k in range(len(offs)):
-                    idx = sl.start + k
-                    blkid = int(wl["blkid"][idx])
-                    o, p = int(offs[k]), int(psz[k])
-                    raw = buf[o:o + p] if avail[k] else None
-                    good = bool(ok[k])
-                    if not f4[k] and raw is not None and not wl["gang"][idx]:
-                        try:
-                            got = compute(int(ctype[k]), raw)
-                            good = got is None or tuple(got) == tuple(int(x) for x in wl["cksum"][idx])
-                        except Exception:
-                            good = False
-                    data = None
-                    if good and raw is not None:
-                        try:
-                            data = compress.decompress(int(wl["comp"][idx]), raw, int(wl["lsize"][idx]))
-                        except Exception as exc:
-                            log.warning("block %d: decompression failed: %s", blkid, exc)
-                    if data is None:
-                        # gang blocks, other vdevs, fallbacks: go through the full reader
-                        d2, st = lv.read_block(blkid)
-                        if d2 is not None:
-                            data = d2
-                        elif self.opts.include_unverified and raw is not None:
-                            try:
-                                data = compress.decompress(int(wl["comp"][idx]), raw, int(wl["lsize"][idx]))
-                                rec.extra.setdefault("unverified_blocks", []).append(blkid)
-                                log.warning("block %d written UNVERIFIED (checksum mismatch)", blkid)
-                            except Exception:
-                                data = None
-                    if data is None:
-                        continue
-                    self._write_block(f, blkid, bs, data, start, end)
-                    written[blkid - lo] = True
-                done += int(psz.sum())
-                if time.monotonic() - last_log > 30:
-                    last_log = time.monotonic()
-                    log.info("  %.1f%% (%.0f MB/s)", 100 * done / max(1, total), done / (last_log - t0) / 1e6)
-            # Everything the physical pass did not write, driven by the run-length coverage
-            # table: holes stay sparse, lost runs become gaps in one step, and only
-            # recoverable-but-unwritten blocks (embedded, fallbacks) are visited one by one.
-            runs = self.db.execute(
-                "SELECT first_blkid, count, status FROM volume_coverage WHERE volume_id=? AND "
-                "first_blkid < ? AND first_blkid + count > ? ORDER BY first_blkid", (volume_id, hi, lo)).fetchall()
-            covered_to = lo
-            for r in runs:
-                a_blk, b_blk = max(lo, r["first_blkid"]), min(hi, r["first_blkid"] + r["count"])
-                if a_blk > covered_to:                   # no coverage row at all: no metadata
-                    self._gap_blocks(rec, covered_to, a_blk, bs, start, end, BlockStatus.NO_METADATA)
-                covered_to = max(covered_to, b_blk)
-                st = BlockStatus[r["status"].upper()]
-                if st in (BlockStatus.HOLE, BlockStatus.DISCARDED):
-                    continue
-                if st in RECOVERED or st == BlockStatus.UNKNOWN:
-                    todo = np.nonzero(~written[a_blk - lo:b_blk - lo])[0] + a_blk
-                    for blkid in todo.tolist():
-                        data, st2 = lv.read_block(blkid)
-                        if data is not None:
-                            self._write_block(f, blkid, bs, data, start, end)
-                        else:
-                            self._gap_blocks(rec, blkid, blkid + 1, bs, start, end, st2)
-                else:
-                    self._gap_blocks(rec, a_blk, b_blk, bs, start, end, st)
-            if covered_to < hi:
-                self._gap_blocks(rec, covered_to, hi, bs, start, end, BlockStatus.NO_METADATA)
+            # Pipeline: one thread reads the next window of the physical-order plan while
+            # workers verify and decompress earlier ones; blocks are written in plan order.
+            reads = prefetch((self._read_window(w) for w in windows(wl)), depth=SETTINGS.io_depth)
+            decoded = ordered_map(lambda r: self._decode_window(wl, r), reads,
+                                  workers=SETTINGS.workers, ahead=SETTINGS.workers + 1)
+            try:
+                for sl, results in decoded:
+                    if self._stopped():
+                        self._cancel(rec)
+                        break
+                    for k, (data, raw) in enumerate(results):
+                        idx = sl.start + k
+                        blkid = int(wl["blkid"][idx])
+                        if data is None:
+                            data = self._fallback_block(lv, wl, idx, raw, rec)
+                        if data is None:
+                            continue
+                        self._write_block(f, blkid, bs, data, start, end)
+                        written[blkid - lo] = True
+                    if self.progress:
+                        self.progress.advance(float(wl["psize"][sl].sum()))
+            finally:
+                decoded.close()
+            if rec.extra.get("cancelled"):
+                self._gap_unwritten(rec, written, lo, bs, start, end)
+            else:
+                self._fill_the_rest(rec, f, volume_id, written, lv, lo, hi, bs, start, end)
             for g in rec.gaps:
                 self._fill(f, g.offset, g.length)
         self._finish(rec, path, image=True)
         return rec
+
+    def _fill_the_rest(self, rec, f, volume_id, written, lv, lo, hi, bs, start, end) -> None:
+        """Everything the physical pass did not write, driven by the run-length coverage
+        table: holes stay sparse, lost runs become gaps in one step, and only
+        recoverable-but-unwritten blocks (embedded, fallbacks) are visited one by one."""
+        runs = self.db.execute(
+            "SELECT first_blkid, count, status FROM volume_coverage WHERE volume_id=? AND "
+            "first_blkid < ? AND first_blkid + count > ? ORDER BY first_blkid", (volume_id, hi, lo)).fetchall()
+        covered_to = lo
+        for r in runs:
+            a_blk, b_blk = max(lo, r["first_blkid"]), min(hi, r["first_blkid"] + r["count"])
+            if a_blk > covered_to:                   # no coverage row at all: no metadata
+                self._gap_blocks(rec, covered_to, a_blk, bs, start, end, BlockStatus.NO_METADATA)
+            covered_to = max(covered_to, b_blk)
+            st = BlockStatus[r["status"].upper()]
+            if st in (BlockStatus.HOLE, BlockStatus.DISCARDED):
+                continue
+            if st in RECOVERED or st == BlockStatus.UNKNOWN:
+                todo = np.nonzero(~written[a_blk - lo:b_blk - lo])[0] + a_blk
+                for blkid in todo.tolist():
+                    data, st2 = lv.read_block(blkid)
+                    if data is not None:
+                        self._write_block(f, blkid, bs, data, start, end)
+                    else:
+                        self._gap_blocks(rec, blkid, blkid + 1, bs, start, end, st2)
+            else:
+                self._gap_blocks(rec, a_blk, b_blk, bs, start, end, st)
+        if covered_to < hi:
+            self._gap_blocks(rec, covered_to, hi, bs, start, end, BlockStatus.NO_METADATA)
+
+    def _fallback_block(self, lv, wl, idx, raw, rec) -> bytes | None:
+        """Gang blocks, other copies, older versions: go through the full reader."""
+        blkid = int(wl["blkid"][idx])
+        data, _st = lv.read_block(blkid)
+        if data is None and self.opts.include_unverified and raw is not None:
+            try:
+                data = compress.decompress(int(wl["comp"][idx]), raw, int(wl["lsize"][idx]))
+                rec.extra.setdefault("unverified_blocks", []).append(blkid)
+                log.warning("block %d written UNVERIFIED (checksum mismatch)", blkid)
+            except Exception:
+                data = None
+        return data
+
+    # ------------------------------------------------------------------ pipeline stages
+    def _read_window(self, w):
+        """I/O stage: one window of the plan (RAIDZ: all members in parallel)."""
+        sl, vdev, w0, w1 = w
+        top = self.pool.vdevs.top.get(vdev)
+        return sl, (top.read_window(w0, w1) if top is not None and not top.unsupported else None)
+
+    @staticmethod
+    def _decode_window(wl, r):
+        """CPU stage: verify and decompress each block of a window. Touches no shared state.
+
+        Returns (slice, [(data or None, raw bytes when they failed verification)])."""
+        sl, win = r
+        psz = wl["psize"][sl]
+        buf, offs, avail = b"", np.zeros(len(psz), np.int64), np.zeros(len(psz), bool)
+        if win is not None:
+            buf, offs, avail = win.gather(wl["offset"][sl], psz)
+        ctype = wl["ctype"][sl]
+        ok = np.zeros(len(offs), dtype=bool)
+        f4 = (ctype == ChecksumType.FLETCHER_4) & ~wl["gang"][sl] & avail
+        if f4.any():
+            ok[f4] = (fletcher4_many(buf, offs[f4], psz[f4]) == wl["cksum"][sl][f4]).all(axis=1)
+        out = []
+        for k in range(len(offs)):
+            idx = sl.start + k
+            o, p = int(offs[k]), int(psz[k])
+            raw = buf[o:o + p] if avail[k] else None
+            good = bool(ok[k])
+            if not f4[k] and raw is not None and not wl["gang"][idx]:
+                try:
+                    got = compute(int(ctype[k]), raw)
+                    good = got is None or tuple(got) == tuple(int(x) for x in wl["cksum"][idx])
+                except Exception:
+                    good = False
+            data = None
+            if good and raw is not None:
+                try:
+                    data = compress.decompress(int(wl["comp"][idx]), raw, int(wl["lsize"][idx]))
+                except Exception as exc:
+                    log.warning("block %d: decompression failed: %s", int(wl["blkid"][idx]), exc)
+            out.append((data, None if good else raw))
+        return sl, out
+
+    # ------------------------------------------------------------------ cancellation
+    def _stopped(self) -> bool:
+        ev = getattr(self.stop, "event", self.stop)
+        return bool(ev is not None and ev.is_set())
+
+    def _cancel(self, rec: OutputRecord) -> None:
+        rec.extra["cancelled"] = True
+        self.cancelled = True
+        log.warning("%s: extraction cancelled; unwritten ranges are recorded as gaps", rec.path)
+
+    def _gap_unwritten(self, rec, written, lo, bs, start, end) -> None:
+        """After a cancel, every block not yet written is a gap (reason: cancelled)."""
+        idx = np.nonzero(~written)[0]
+        if not len(idx):
+            return
+        for run in np.split(idx, np.nonzero(np.diff(idx) != 1)[0] + 1):
+            a = max(start, (lo + int(run[0])) * bs)
+            b = min(end, (lo + int(run[-1]) + 1) * bs)
+            if b > a:
+                self._add_gap(rec, a - start, b - a, "extraction cancelled before this range was read")
 
     @staticmethod
     def _write_block(f, blkid: int, bs: int, data: bytes, start: int, end: int) -> None:
@@ -292,7 +352,17 @@ class Extractor:
         firsts = {r["id"]: (self.db.execute("SELECT min(volume_offset) FROM fs_extents WHERE entry_id=?",
                                             (r["id"],)).fetchone()[0] or 0) for r in sel if r["type"] == "file"}
         dirs_meta = []
+        if self.progress:
+            self.progress.begin(f"extract files from filesystem {fs_id}",
+                                float(sum((r["size"] or 0) for r in sel if r["type"] == "file")), "bytes")
         for r in sorted(sel, key=lambda r: (r["type"] != "dir", firsts.get(r["id"], 0))):
+            if self._stopped():
+                self.cancelled = True
+                log.warning("file extraction cancelled; %d entries were not extracted",
+                            sum(1 for x in sel if x["type"] == "file") - sum(1 for o in self.records if o.kind == "file"))
+                break
+            if self.progress and r["type"] == "file":
+                self.progress.advance(float(r["size"] or 0), message=r["path"])
             target = root / self.local_rel[r["path"]]
             try:
                 if r["type"] == "dir":
@@ -446,8 +516,10 @@ class Extractor:
         outs = old + [{**r.__dict__, "gaps": [g.__dict__ for g in r.gaps], "lost_bytes": r.lost_bytes}
                       for r in self.records]
         summary = {s: sum(1 for o in outs if o["status"] == s) for s in ("full", "partial", "none")}
-        path.write_text(json.dumps({"tool": "zesus", "written_at": now(),
-                                    "summary": summary, **(extra or {}), "outputs": outs}, indent=1), encoding="utf-8")
+        head = {"tool": "zesus", "written_at": now(), "summary": summary}
+        if self.cancelled:
+            head["cancelled"] = True
+        path.write_text(json.dumps({**head, **(extra or {}), "outputs": outs}, indent=1), encoding="utf-8")
         return path
 
 

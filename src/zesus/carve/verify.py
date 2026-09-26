@@ -19,6 +19,7 @@ import numpy as np
 
 from ..map.codes import LOST, RECOVERED, BlockStatus
 from ..map.db import MapDB, j
+from ..parallel import SETTINGS, ordered_map, prefetch
 from ..zfs import blkptr
 from ..zfs.blkptr import BlockPointer
 from ..zfs.checksum import compute
@@ -84,7 +85,8 @@ def _fields(blkid: np.ndarray, w: np.ndarray) -> dict[str, np.ndarray]:
 
 
 def chosen_blocks(pool: Pool, spans: dict[int, Span], statuses: set[int],
-                  blk_range: tuple[int, int] | None = None, label: str = "") -> dict[str, np.ndarray]:
+                  blk_range: tuple[int, int] | None = None, label: str = "",
+                  stop=None) -> dict[str, np.ndarray]:
     """Collect the chosen L0 pointers whose status is in *statuses* (optionally only
     for block ids in [lo, hi)), as flat arrays sorted by (vdev, physical offset).
 
@@ -108,7 +110,11 @@ def chosen_blocks(pool: Pool, spans: dict[int, Span], statuses: set[int],
     log.info("%s: reading %d level-1 blocks to enumerate data blocks", label, len(keys))
     parts: list[dict[str, np.ndarray]] = []
     t0 = time.monotonic()
+    ev = getattr(stop, "event", stop)
     for i, k in enumerate(keys):
+        if ev is not None and ev.is_set():
+            log.warning("%s: stopped while listing data blocks", label)
+            break
         users = need[k]
         sp0, ci0 = users[0]
         words = l1_children(pool, sp0.cands[ci0][0], 1 << 10)
@@ -151,6 +157,8 @@ def add_extents(pool: Pool, wl: dict[str, np.ndarray]) -> dict[str, np.ndarray]:
 def windows(wl: dict[str, np.ndarray], window_max: int = WINDOW_MAX, gap_max: int = GAP_MAX):
     """Yield (slice, vdev, start, end): runs of nearby blocks to read in one request."""
     n = len(wl["blkid"])
+    if not n:
+        return
     size = wl["extent"] if "extent" in wl else wl["psize"]
     i = 0
     while i < n:
@@ -170,8 +178,9 @@ def windows(wl: dict[str, np.ndarray], window_max: int = WINDOW_MAX, gap_max: in
 
 
 class Verifier:
-    def __init__(self, pool: Pool, db: MapDB, volume_id: int, stop=None) -> None:
+    def __init__(self, pool: Pool, db: MapDB, volume_id: int, stop=None, progress=None) -> None:
         self.pool, self.db, self.volume_id, self.stop = pool, db, volume_id, stop
+        self.progress = progress
         self.spans = load_spans(db, volume_id)
         self.repaired = 0                # blocks rebuilt from RAIDZ parity in the bulk pass
 
@@ -179,11 +188,16 @@ class Verifier:
     def build_worklist(self) -> dict[str, np.ndarray]:
         """The chosen, not-yet-verified L0 pointers of every span, in physical order."""
         return add_extents(self.pool, chosen_blocks(self.pool, self.spans, {BlockStatus.UNKNOWN},
-                                                    label="verify"))
+                                                    label="verify", stop=self.stop))
 
     # ------------------------------------------------------------------ bulk pass
     def run(self) -> None:
         wl = self.build_worklist()      # may mark slots whose L1 became unreadable
+        if self.stop and self.stop.event.is_set():
+            # The work list may be incomplete: a checkpoint index into it would not match
+            # the full list on resume, so stop without saving one.
+            log.warning("verify: stopped before verification began; nothing saved")
+            return
         status = np.zeros(max((sp.first + sp.count for sp in self.spans.values()), default=0), dtype=np.uint8)
         for sp in self.spans.values():
             status[sp.first:sp.first + sp.count] = np.frombuffer(bytes(sp.status), dtype=np.uint8)
@@ -194,71 +208,87 @@ class Verifier:
             start, saved = ck
             status = saved
             log.info("verify: resuming at %d/%d", start, n)
-        log.info("verify: %d data blocks to verify (%.1f GiB)", n,
-                 float(wl["psize"].sum()) / (1 << 30) if n else 0)
-        t0 = time.monotonic()
-        last_ck = t0
-        done_bytes = 0
+        total = float(wl["psize"].sum()) if n else 0.0
+        log.info("verify: %d data blocks to verify (%.1f GiB)", n, total / (1 << 30))
+        prog = self.progress
+        if prog:
+            prog.begin("verify", total, "bytes")
+            prog.set(float(wl["psize"][:start].sum()) if start else 0.0)
+        last_ck = time.monotonic()
         sub = {k: v[start:] for k, v in wl.items()}
-        for sl, v, w_start, w_end in windows(sub):
-            if self.stop and self.stop.event.is_set():
-                self._save_ckpt(start + sl.start, status)
-                log.warning("verify: stopped at %d/%d (checkpoint saved)", start + sl.start, n)
-                return
-            self._verify_window(sub, sl, v, w_start, w_end, status)
-            done_bytes += int(sub["psize"][sl].sum())
-            i = start + sl.stop
-            now = time.monotonic()
-            if now - last_ck > CKPT_EVERY_S:
-                self._save_ckpt(i, status)
-                last_ck = now
-                rate = done_bytes / (now - t0)
-                rem = float(wl["psize"][i:].sum()) if i < n else 0
-                log.info("verify: %5.1f%%  %.0f MB/s  ETA %dm", 100 * i / n, rate / 1e6, rem / rate // 60 if rate else 0)
+        # Pipeline: one thread reads the next window of the physical-order plan while
+        # workers check earlier ones; results are applied strictly in plan order.
+        reads = prefetch((self._read_window(sub, w) for w in windows(sub)), depth=SETTINGS.io_depth)
+        checked = ordered_map(lambda r: self._check_window(sub, r), reads,
+                              workers=SETTINGS.workers, ahead=SETTINGS.workers + 1)
+        try:
+            for sl, blkid, ok, zeroed, repaired in checked:
+                if self.stop and self.stop.event.is_set():
+                    self._save_ckpt(start + sl.start, status)
+                    log.warning("verify: stopped at %d/%d (checkpoint saved)", start + sl.start, n)
+                    return
+                status[blkid[ok]] = BlockStatus.OK
+                status[blkid[~ok & zeroed]] = BlockStatus.ZEROED
+                status[blkid[~ok & ~zeroed]] = BlockStatus.CKSUM_MISMATCH
+                self.repaired += repaired
+                i = start + sl.stop
+                if prog:
+                    prog.advance(float(sub["psize"][sl].sum()))
+                now = time.monotonic()
+                if now - last_ck > CKPT_EVERY_S:
+                    self._save_ckpt(i, status)
+                    last_ck = now
+        finally:
+            checked.close()
         self._save_ckpt(n, status)
         if self.repaired:
             log.info("verify: %d blocks were rebuilt from RAIDZ parity (each checked against its "
                      "block pointer's checksum)", self.repaired)
             self.db.event("info", "verify", f"{self.repaired} blocks rebuilt from RAIDZ parity",
                           volume_id=self.volume_id)
+        if prog:
+            prog.begin("verify: fallback for failed blocks", 0, "blocks")
         self.fallback(status)
         self.write_back(status)
         self._clear_ckpt()
 
-    def _verify_window(self, wl, sl, vdev: int, start: int, end: int, status: np.ndarray) -> None:
+    def _read_window(self, wl, w):
+        """I/O stage: read one window (all member disks in parallel for RAIDZ)."""
+        sl, vdev, start, end = w
+        top = self.pool.vdevs.top.get(vdev)
+        win = top.read_window(start, end) if top is not None and not top.unsupported else None
+        return sl, win
+
+    def _check_window(self, wl, r) -> tuple[slice, np.ndarray, np.ndarray, np.ndarray, int]:
+        """CPU stage: assemble blocks and compare checksums. Touches no shared state."""
+        sl, win = r
         blkid = wl["blkid"][sl]
         psz = wl["psize"][sl]
         ctype = wl["ctype"][sl]
         gang = wl["gang"][sl]
         expect = wl["cksum"][sl]
-        top = self.pool.vdevs.top.get(vdev)
         buf, offs, avail = b"", np.zeros(len(blkid), np.int64), np.zeros(len(blkid), bool)
-        if top is not None and not top.unsupported:
-            win = top.read_window(start, end)
+        if win is not None:
             buf, offs, avail = win.gather(wl["offset"][sl], psz)
-            self.repaired += win.repaired
         ok = np.zeros(len(blkid), dtype=bool)
+        zeroed = np.zeros(len(blkid), dtype=bool)
         f4 = (ctype == ChecksumType.FLETCHER_4) & ~gang & avail
         if f4.any():
             got = fletcher4_many(buf, offs[f4], psz[f4])
             ok[f4] = (got == expect[f4]).all(axis=1)
-        others = np.nonzero(~f4)[0]
-        for idx in others:
+        for idx in np.nonzero(~f4)[0]:
             o, p = int(offs[idx]), int(psz[idx])
             if gang[idx] or not avail[idx]:
-                ok[idx] = False       # handled per-block in fallback
-                continue
+                continue              # handled per-block in fallback
             try:
                 got = compute(int(ctype[idx]), buf[o:o + p])
             except Exception:
                 got = None
             ok[idx] = got is None or tuple(got) == tuple(int(x) for x in expect[idx])
-        status[blkid[ok]] = BlockStatus.OK
-        bad = np.nonzero(~ok)[0]
-        for idx in bad:
+        for idx in np.nonzero(~ok & avail)[0]:
             o, p = int(offs[idx]), int(psz[idx])
-            seg = buf[o:o + p] if avail[idx] else b""
-            status[blkid[idx]] = BlockStatus.ZEROED if seg and not any(seg) else BlockStatus.CKSUM_MISMATCH
+            zeroed[idx] = not any(buf[o:o + p])
+        return sl, blkid, ok, zeroed, (win.repaired if win is not None else 0)
 
     # ------------------------------------------------------------------ fallback
     def fallback(self, status: np.ndarray) -> None:

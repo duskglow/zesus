@@ -21,12 +21,15 @@ import struct
 import threading
 import time
 from collections.abc import Callable
+from concurrent.futures import ProcessPoolExecutor
+from contextlib import contextmanager
 from dataclasses import dataclass
 
 import lz4.block
 import numpy as np
 
 from ..map.db import MapDB, j
+from ..parallel import SETTINGS, ordered_submit, prefetch
 from ..zfs.constants import VDEV_LABEL_START_SIZE
 from .classify import Classified, PoolLimits, classify, classify_objset
 
@@ -165,32 +168,69 @@ def run_carve(db: MapDB, target: CarveTarget, lim: PoolLimits, *, chunk_size: in
              chunk_size >> 20, total - len(remaining))
     t0 = time.monotonic()
     bytes_done = 0
-    for o in remaining:
-        if stop and stop.event.is_set():
-            log.warning("carving stopped by request; resume with --resume")
-            return False
+    bs = 1 << target.ashift
+
+    def read(o: int) -> tuple[int, int, bytes]:
         clen = min(chunk_size, end - o)
-        phys = VDEV_LABEL_START_SIZE + o                       # within the vdev slice
-        raw = target.source.pread(phys, clen + TAIL)
+        raw = target.source.pread(VDEV_LABEL_START_SIZE + o, clen + TAIL)   # within the vdev slice
         if len(raw) < clen:
-            clen = len(raw) - len(raw) % (1 << target.ashift)
-        hits, st = carve_chunk(raw, clen, o, lim, target.ashift)
-        with db.tx():
-            for dva_off, kind, comp, psize, c in hits:
-                db.conn.execute(
-                    "INSERT INTO carved(pool_id,vdev_top,dva_offset,phys,kind,comp,psize_hint,lsize,"
-                    "child_type,child_level,n_children,n_holes,min_birth,max_birth,os_type,info_json) "
-                    "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                    (target.pool_id, target.vdev_top, dva_off,
-                     target.base_phys + VDEV_LABEL_START_SIZE + dva_off, kind, comp, psize, c.lsize,
-                     c.child_type, c.child_level, c.n_children, c.n_holes, c.min_birth, c.max_birth,
-                     c.os_type, j(c.info) if c.info else None))
-            db.mark(PHASE, f"{unit_prefix}{o:x}", detail=j({"hits": st.hits, "cand": st.candidates,
-                                                           "kinds": st.by_kind}))
-        bytes_done += clen
-        if progress:
-            progress(o + clen, end, st, bytes_done / max(1e-9, time.monotonic() - t0))
+            clen = len(raw) - len(raw) % bs
+        return o, clen, raw
+
+    # One thread reads the next chunk (sequentially) while chunks are classified, in worker
+    # processes when there are several. Chunks are committed strictly in order, so the
+    # map is exactly what a serial run writes.
+    reads = prefetch((read(o) for o in remaining), depth=SETTINGS.io_depth)
+    with carve_executor() as ex:
+        results = (ordered_submit(ex, _carve_task, ((raw, clen, o, lim, target.ashift) for o, clen, raw in reads),
+                                  SETTINGS.carve_workers + 1)
+                   if ex is not None else
+                   (_carve_task((raw, clen, o, lim, target.ashift)) for o, clen, raw in reads))
+        try:
+            for o, clen, hits, st in results:
+                if stop and stop.event.is_set():
+                    log.warning("carving stopped by request; run the same command again to resume")
+                    return False
+                with db.tx():
+                    for dva_off, kind, comp, psize, c in hits:
+                        db.conn.execute(
+                            "INSERT INTO carved(pool_id,vdev_top,dva_offset,phys,kind,comp,psize_hint,lsize,"
+                            "child_type,child_level,n_children,n_holes,min_birth,max_birth,os_type,info_json) "
+                            "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                            (target.pool_id, target.vdev_top, dva_off,
+                             target.base_phys + VDEV_LABEL_START_SIZE + dva_off, kind, comp, psize, c.lsize,
+                             c.child_type, c.child_level, c.n_children, c.n_holes, c.min_birth, c.max_birth,
+                             c.os_type, j(c.info) if c.info else None))
+                    db.mark(PHASE, f"{unit_prefix}{o:x}", detail=j({"hits": st.hits, "cand": st.candidates,
+                                                                   "kinds": st.by_kind}))
+                bytes_done += clen
+                if progress:
+                    progress(o + clen, end, st, bytes_done / max(1e-9, time.monotonic() - t0))
+        finally:
+            if hasattr(results, "close"):
+                results.close()
     return True
+
+
+def _carve_task(args) -> tuple[int, int, list, ChunkStats]:
+    """Picklable unit of carving work: classify one chunk (runs in a worker process)."""
+    raw, clen, o, lim, ashift = args
+    hits, st = carve_chunk(raw, clen, o, lim, ashift)
+    return o, clen, hits, st
+
+
+@contextmanager
+def carve_executor(initializer=None, initargs=()):
+    """A process pool for classifying chunks, or None to classify in this process."""
+    n = SETTINGS.carve_workers
+    if n <= 1:
+        yield None
+        return
+    ex = ProcessPoolExecutor(max_workers=n, initializer=initializer, initargs=initargs)
+    try:
+        yield ex
+    finally:
+        ex.shutdown(wait=True, cancel_futures=True)
 
 
 def lz4_header(buf: bytes) -> int:

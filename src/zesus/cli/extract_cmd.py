@@ -19,7 +19,8 @@ def add_extract_parser(sub) -> None:
                        description="Extract data using a map. The source image/device is read-only and "
                                    "every block is re-verified. Gaps are reported, never hidden.")
     e.add_argument("map")
-    e.add_argument("source", help="the same image/device the map was built from")
+    e.add_argument("source", nargs="*",
+                   help="the image(s)/device(s) the map was built from (default: the paths recorded in the map)")
     e.add_argument("-o", "--out", help="output directory (required unless --list)")
     e.add_argument("--list", action="store_true", help="list what can be extracted and exit")
     e.add_argument("--volume", action="append", default=[], metavar="ID|NAME",
@@ -45,6 +46,9 @@ def add_extract_parser(sub) -> None:
     e.add_argument("--partial-suffix", default=None, help="append this suffix to incomplete outputs")
     e.add_argument("--force", action="store_true", help="overwrite existing outputs")
     e.add_argument("--no-sparse", action="store_true", help="do not create sparse output files")
+    e.add_argument("--progress-interval", type=float, default=30, help="seconds between progress lines")
+    from .main import add_parallel_args
+    add_parallel_args(e)
     e.set_defaults(func=cmd_extract)
 
     sd = sub.add_parser("send", help="send recovered files back where they belong (rsync + original metadata)",
@@ -54,7 +58,8 @@ def add_extract_parser(sub) -> None:
                                     "overwritten unless --overwrite; partially recovered files are held back "
                                     "unless --include-partial.")
     sd.add_argument("map")
-    sd.add_argument("source", help="the same image/device the map was built from")
+    sd.add_argument("source", nargs="*",
+                    help="the image(s)/device(s) the map was built from (default: the paths recorded in the map)")
     sd.add_argument("--fs", type=int, required=True, metavar="FSID", help="filesystem id (see extract --list)")
     sd.add_argument("--path", action="append", default=[], metavar="GLOB",
                     help="only these paths (glob or directory prefix); default: everything")
@@ -112,10 +117,9 @@ def print_list(db, out=sys.stdout) -> None:
 
 
 def cmd_extract(args: argparse.Namespace) -> int:
+    from ..evidence import EvidenceError, open_evidence, pool_for_map
     from ..extract.engine import Extractor, Options
-    from ..io.source import RawSource
     from ..map.db import MapDB
-    from ..zfs.pool import open_pools
 
     logsetup.setup(args.verbose, args.log)
     db = MapDB(args.map, readonly=True)
@@ -126,18 +130,23 @@ def cmd_extract(args: argparse.Namespace) -> int:
         raise SystemExit("--out is required")
     if not (args.volume or args.partition or args.fs or args.fs_image):
         raise SystemExit("nothing selected: use --volume, --partition or --fs (see --list)")
-    src = RawSource(args.source)
-    prev = db.execute("SELECT size, mtime_ns FROM sources ORDER BY id DESC LIMIT 1").fetchone()
-    if prev and prev["size"] != src.size:
-        raise SystemExit(f"source size {src.size} does not match the map's source ({prev['size']})")
-    pools = open_pools(src)
-    if not pools:
-        raise SystemExit("no ZFS pool found in source")
-    pool = pools[0]
+    try:
+        src = open_evidence(db, args.source)
+        pool = pool_for_map(db, src)
+    except EvidenceError as exc:
+        raise SystemExit(str(exc)) from exc
+    from ..carve.scanner import Stop
+    from ..progress import Progress, cli_logger
+    from .main import apply_parallel_args
+    apply_parallel_args(args, [m.name for m in src])
+    stop = Stop()
+    stop.install()
+    prog = Progress("extract")
+    prog.listen(cli_logger(log), args.progress_interval)
     ex = Extractor(db, pool, Options(out_dir=Path(args.out), fill=args.fill,
                                      include_unverified=args.include_unverified, force=args.force,
                                      partial_suffix=args.partial_suffix, sparse=not args.no_sparse,
-                                     hash_outputs=not args.no_hash))
+                                     hash_outputs=not args.no_hash), progress=prog, stop=stop)
     if args.include_unverified:
         log.warning("--include-unverified: blocks failing their checksum WILL be written; outputs may be corrupt")
     t0 = time.monotonic()
@@ -176,7 +185,8 @@ def cmd_extract(args: argparse.Namespace) -> int:
     for fid in args.fs:
         ex.extract_files(fid, patterns=args.path or None, statuses=set(args.status.split(",")),
                          include_deleted=not args.no_deleted)
-    man = ex.write_manifest({"map": str(Path(args.map).resolve()), "source": args.source})
+    man = ex.write_manifest({"map": str(Path(args.map).resolve()), "source": src.name,
+                             "sources": [m.name for m in src]})
     full = sum(1 for r in ex.records if r.status == "full")
     part = sum(1 for r in ex.records if r.status == "partial")
     none = sum(1 for r in ex.records if r.status == "none")
@@ -189,15 +199,17 @@ def cmd_extract(args: argparse.Namespace) -> int:
 def cmd_send(args: argparse.Namespace) -> int:
     import shlex
 
+    from ..evidence import EvidenceError, open_evidence, pool_for_map
     from ..extract.send import SendOptions, send
-    from ..io.source import RawSource
     from ..map.db import MapDB
-    from ..zfs.pool import open_pools
 
     logsetup.setup(args.verbose, args.log)
     db = MapDB(args.map, readonly=True)
-    src = RawSource(args.source)
-    pool = open_pools(src)[0]
+    try:
+        src = open_evidence(db, args.source)
+        pool = pool_for_map(db, src)
+    except EvidenceError as exc:
+        raise SystemExit(str(exc)) from exc
     staging = Path(args.staging) if args.staging else Path(args.map).resolve().parent / "staging"
     opts = SendOptions(dest=args.to, staging=staging, ssh_args=shlex.split(args.ssh), overwrite=args.overwrite,
                        include_partial=args.include_partial, dry_run=args.dry_run, sudo=args.sudo,
