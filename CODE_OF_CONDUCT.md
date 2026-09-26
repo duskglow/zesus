@@ -35,8 +35,11 @@ Not allowed there, for example:
   repository;
 * arguing about current events, or answering someone else's political remark.
 
-What people do and say outside project spaces is their own business and is not our
-concern here.
+Contributors are free to hold and express any views they like outside project spaces.
+However, directing public attacks, harassment or bad-faith criticism at the project, its
+maintainers or its community from outside project spaces is incompatible with contributing
+to it. Honest, good-faith criticism is always welcome, wherever it is made: a public bug
+report, a critical review, or a write-up of where Zesus failed you.
 
 If someone brings politics in, **do not reply to it**. Report it to the maintainers, who
 will remove or hide the content and, if needed, lock the thread. Repeated or deliberate
