@@ -56,7 +56,7 @@ class MapDB:
             v = self.get_meta("schema_version")
             if v is not None and int(v) != SCHEMA_VERSION:
                 raise RuntimeError(f"map {self.path} has schema v{v}; this tool expects v{SCHEMA_VERSION}")
-        sql = resources.files("zfsrecover.map").joinpath("schema.sql").read_text(encoding="utf-8")
+        sql = resources.files("zesus.map").joinpath("schema.sql").read_text(encoding="utf-8")
         self.conn.executescript(sql)
         self._migrate()
         if not exists:

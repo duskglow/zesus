@@ -1,4 +1,4 @@
-"""`zfsrecover report`: a human-readable account of what was found, what can be
+"""`zesus report`: a human-readable account of what was found, what can be
 recovered, and what cannot (and why), plus a per-file CSV."""
 
 from __future__ import annotations

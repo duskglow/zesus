@@ -1,6 +1,8 @@
-# zfs-forensic-recovery
+# Zesus
 
-Forensic scanner and extractor for ZFS pools. It can recover **destroyed datasets and
+**ZFS Emergency Storage Undelete Support**: it resurrects dead ZFS volumes and datasets.
+
+Zesus is a forensic scanner and extractor for ZFS pools. It can recover **destroyed datasets and
 zvols**, including ones that have fallen off the uberblock ring where
 `zpool import -T <txg>` can no longer reach them.
 
@@ -48,7 +50,7 @@ volumes, partitions or individual files, re-verifying every block as it goes.
 ## Install
 
 ```bash
-pip install "zfs-forensic-recovery[all]"      # or, from a checkout: pip install -e ".[all]"
+pip install "zesus[all]"      # or, from a checkout: pip install -e ".[all]"
 ```
 
 Python 3.10+. Required dependencies are numpy and lz4. The optional extras are:
@@ -59,23 +61,23 @@ Python 3.10+. Required dependencies are numpy and lz4. The optional extras are:
 
 ```bash
 # 1. Scan (resumable: re-run the same command after an interruption)
-zfsrecover scan /dev/sdb -o case.sqlite            # or a raw image: disk.img
+zesus scan /dev/sdb -o case.sqlite            # or a raw image: disk.img
 
 # 2. See what was found
-zfsrecover info case.sqlite
-zfsrecover extract case.sqlite /dev/sdb --list
-zfsrecover ls case.sqlite / -l --fs 1
+zesus info case.sqlite
+zesus extract case.sqlite /dev/sdb --list
+zesus ls case.sqlite / -l --fs 1
 
 # 3. Extract
-zfsrecover extract case.sqlite /dev/sdb -o out/ --volume 1              # whole zvol as out/<name>.img
-zfsrecover extract case.sqlite /dev/sdb -o out/ --partition 1:1         # one partition of it
-zfsrecover extract case.sqlite /dev/sdb -o out/ --fs 1 --path '/home/*' # selected files
+zesus extract case.sqlite /dev/sdb -o out/ --volume 1              # whole zvol as out/<name>.img
+zesus extract case.sqlite /dev/sdb -o out/ --partition 1:1         # one partition of it
+zesus extract case.sqlite /dev/sdb -o out/ --fs 1 --path '/home/*' # selected files
 
 # 4. Write a recovery report: what was found, what is lost and why (Markdown + per-file CSV)
-zfsrecover report case.sqlite -o case-report.md
+zesus report case.sqlite -o case-report.md
 
 # 5. Or browse in a local web UI
-zfsrecover web case.sqlite --source /dev/sdb       # http://127.0.0.1:8765/
+zesus web case.sqlite --source /dev/sdb       # http://127.0.0.1:8765/
 ```
 
 The scan phases are `history`, `datasets`, `carve`, `reconstruct`, `verify` and `contents`.
@@ -111,7 +113,7 @@ New filesystems are plugins and need no change to core code. See
 ```bash
 pip install -e ".[dev,all]"
 pytest                                  # unit tests (small real ext4 images in tests/fixtures)
-ZFR_TEST_IMAGE=/path/to/pool.img pytest -m image   # integration tests against a real pool image
+ZESUS_TEST_IMAGE=/path/to/pool.img pytest -m image   # integration tests against a real pool image
 python dev/imgtool.py --image disk.img uberblocks  # low-level inspection helpers
 ```
 

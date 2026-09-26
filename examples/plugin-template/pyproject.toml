@@ -3,12 +3,12 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [project]
-name = "zfsrecover-example-fs"
+name = "zesus-example-fs"
 version = "0.1.0"
-dependencies = ["zfs-forensic-recovery"]
+dependencies = ["zesus"]
 
-[project.entry-points."zfsrecover.filesystems"]
-examplefs = "zfsrecover_example:ExampleFsPlugin"
+[project.entry-points."zesus.filesystems"]
+examplefs = "zesus_example:ExampleFsPlugin"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/zfsrecover_example"]
+packages = ["src/zesus_example"]

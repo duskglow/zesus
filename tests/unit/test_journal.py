@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import struct
 
-from zfsrecover.fs.ext4 import journal as J
+from zesus.fs.ext4 import journal as J
 
 BS = 1024
 

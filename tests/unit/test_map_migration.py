@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import sqlite3
 
-from zfsrecover.map.db import MapDB
+from zesus.map.db import MapDB
 
 OLD_FS = """CREATE TABLE filesystems (
     id INTEGER PRIMARY KEY, volume_id INTEGER NOT NULL REFERENCES volumes(id),

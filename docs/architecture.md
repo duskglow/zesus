@@ -1,13 +1,13 @@
 # Architecture
 
 ```
-            ┌────────────────────────── zfsrecover scan ───────────────────────────┐
+            ┌────────────────────────── zesus scan ───────────────────────────┐
  source ──► │ io (read-only) → zfs core → phases → SQLite map                      │
  (image/    │   history · datasets · carve · reconstruct · verify · contents       │
   device)   └──────────────────────────────────────────────────────────────────────┘
                                              │ map (index only: locations, sizes,
                                              ▼       checksums, statuses)
-            ┌──────────────────────── zfsrecover extract ──────────────────────────┐
+            ┌──────────────────────── zesus extract ──────────────────────────┐
  source ──► │ map + source → re-verified blocks → images / files + gap reports     │
             └──────────────────────────────────────────────────────────────────────┘
 ```
@@ -67,10 +67,10 @@ An 880 GiB zvol with 16 KiB blocks has 57 million logical blocks. The map stores
 1024-block span, the candidate level-1 indirect block pointers (128 bytes each), plus a
 one-byte choice and a one-byte status per slot. That is about 150 MB instead of about 7 GB.
 Every L0 location, size and checksum is derived from a checksum-verified parent at read
-time. `zfsrecover-extract` never trusts anything it has not just verified.
+time. `zesus-extract` never trusts anything it has not just verified.
 
 ## Block statuses
 
-See `zfsrecover/map/codes.py`: `ok`, `ok_stale`, `embedded`, `hole`, `discarded`
+See `zesus/map/codes.py`: `ok`, `ok_stale`, `embedded`, `hole`, `discarded`
 (recoverable or zero by design); `cksum_mismatch`, `zeroed`, `no_metadata`, `unreadable`,
 `decompress_fail` (lost, with reason).

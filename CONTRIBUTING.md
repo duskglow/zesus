@@ -12,13 +12,13 @@ pytest
 ruff check src tests
 ```
 
-Integration tests run against a real ZFS image when `ZFR_TEST_IMAGE` is set.
+Integration tests run against a real ZFS image when `ZESUS_TEST_IMAGE` is set.
 
 ## Ground rules
 
 * **The source is sacred.** Nothing may write to the evidence. All access goes through
-  `zfsrecover.io.RawSource`, and `tests/unit/test_guard.py` enforces the rule. Pull
-  requests that add write paths to `zfsrecover/io` will not be merged.
+  `zesus.io.RawSource`, and `tests/unit/test_guard.py` enforces the rule. Pull
+  requests that add write paths to `zesus/io` will not be merged.
 * **Never guess silently.** Anything unverified or inferred must be labelled as such in
   the map and in output reports.
 * **Be damage-tolerant.** Parsers must survive truncated, zeroed and random input. Log
@@ -30,7 +30,7 @@ Integration tests run against a real ZFS image when `ZFR_TEST_IMAGE` is set.
 ## Reporting a recovery problem
 
 Please include:
-* the output of `zfsrecover info MAP`;
+* the output of `zesus info MAP`;
 * the JSON log (`*.log.jsonl`);
 * your OpenZFS version and pool features (`zpool get all`, if the pool still imports).
 

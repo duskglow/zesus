@@ -28,7 +28,7 @@ def setup(verbosity: int = 0, logfile: str | Path | None = None) -> None:
     console.setFormatter(logging.Formatter("%(asctime)s %(levelname)-7s %(message)s", "%H:%M:%S"))
     if verbosity < 2:
         console.addFilter(lambda r: r.levelno >= logging.INFO and
-                          (verbosity >= 1 or not r.name.startswith("zfsrecover.zfs.")
+                          (verbosity >= 1 or not r.name.startswith("zesus.zfs.")
                            or r.levelno >= logging.WARNING))
     root.addHandler(console)
     if logfile:

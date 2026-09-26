@@ -1,15 +1,15 @@
-"""Integration tests against a real ZFS image (ZFR_TEST_IMAGE). They check general
+"""Integration tests against a real ZFS image (ZESUS_TEST_IMAGE). They check general
 invariants that hold for any healthy-enough pool, not facts about one specific image."""
 
 from __future__ import annotations
 
 import pytest
 
-from zfsrecover.io import RawSource
-from zfsrecover.zfs.dsl import Dsl
-from zfsrecover.zfs.objset import Objset
-from zfsrecover.zfs.pool import open_pools
-from zfsrecover.zfs.zap import read_zap
+from zesus.io import RawSource
+from zesus.zfs.dsl import Dsl
+from zesus.zfs.objset import Objset
+from zesus.zfs.pool import open_pools
+from zesus.zfs.zap import read_zap
 
 pytestmark = pytest.mark.image
 
@@ -17,9 +17,9 @@ pytestmark = pytest.mark.image
 @pytest.fixture(scope="module")
 def pool(request):
     import os
-    p = os.environ.get("ZFR_TEST_IMAGE")
+    p = os.environ.get("ZESUS_TEST_IMAGE")
     if not p or not os.path.exists(p):
-        pytest.skip("set ZFR_TEST_IMAGE")
+        pytest.skip("set ZESUS_TEST_IMAGE")
     src = RawSource(p)
     pools = open_pools(src)
     assert pools, "no pool found"
@@ -51,7 +51,7 @@ def test_newest_mos_and_dsl(pool):
 
 
 def test_history_decodes(pool):
-    from zfsrecover.zfs.history import read_history
+    from zesus.zfs.history import read_history
     for u in pool.uberblocks:
         try:
             mos = Objset(pool.reader, u.rootbp, "MOS")

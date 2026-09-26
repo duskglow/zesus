@@ -4,8 +4,8 @@ from __future__ import annotations
 
 import pytest
 
-from zfsrecover.fs.ext4 import Ext4Plugin
-from zfsrecover.fs.registry import detect
+from zesus.fs.ext4 import Ext4Plugin
+from zesus.fs.registry import detect
 
 BINARY = bytes((i * 7 + i // 251) & 255 for i in range(300 * 1024))
 

@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import struct
 
-from zfsrecover.fs.api import DIR, FILE, Entry, Extent, FilesystemPlugin, FsHandle, FsInfo
+from zesus.fs.api import DIR, FILE, Entry, Extent, FilesystemPlugin, FsHandle, FsInfo
 
 
 class ExampleFsPlugin(FilesystemPlugin):

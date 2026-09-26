@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Developer helper for inspecting a ZFS image with the library's own readers.
 
-The image path comes from --image, $ZFR_TEST_IMAGE, or dev/testimage.toml. Everything is
+The image path comes from --image, $ZESUS_TEST_IMAGE, or dev/testimage.toml. Everything is
 read-only (RawSource + guard).
 
     python dev/imgtool.py gpt
@@ -27,24 +27,24 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from zfsrecover.io import RawSource  # noqa: E402
-from zfsrecover.partitions import detect  # noqa: E402
-from zfsrecover.zfs import blkptr, compress  # noqa: E402
-from zfsrecover.zfs.blkptr import Dva  # noqa: E402
-from zfsrecover.zfs.constants import VDEV_LABEL_START_SIZE, Compression  # noqa: E402
-from zfsrecover.zfs.pool import Pool, open_pools  # noqa: E402
+from zesus.io import RawSource  # noqa: E402
+from zesus.partitions import detect  # noqa: E402
+from zesus.zfs import blkptr, compress  # noqa: E402
+from zesus.zfs.blkptr import Dva  # noqa: E402
+from zesus.zfs.constants import VDEV_LABEL_START_SIZE, Compression  # noqa: E402
+from zesus.zfs.pool import Pool, open_pools  # noqa: E402
 
 
 def image_path(arg: str | None) -> str:
     if arg:
         return arg
-    if os.environ.get("ZFR_TEST_IMAGE"):
-        return os.environ["ZFR_TEST_IMAGE"]
+    if os.environ.get("ZESUS_TEST_IMAGE"):
+        return os.environ["ZESUS_TEST_IMAGE"]
     cfg = Path(__file__).with_name("testimage.toml")
     if cfg.exists():
         import tomllib
         return tomllib.loads(cfg.read_text())["image"]["path"]
-    raise SystemExit("no image: pass --image, set ZFR_TEST_IMAGE, or create dev/testimage.toml")
+    raise SystemExit("no image: pass --image, set ZESUS_TEST_IMAGE, or create dev/testimage.toml")
 
 
 def hexdump(b: bytes, base: int = 0, limit: int = 512) -> None:
@@ -65,7 +65,7 @@ def pool_of(src) -> Pool:
 
 
 def mos_at(pool: Pool, txg: int | None):
-    from zfsrecover.zfs.objset import Objset
+    from zesus.zfs.objset import Objset
     for ub in pool.uberblocks:
         if txg is not None and ub.txg != txg:
             continue
@@ -79,8 +79,8 @@ def mos_at(pool: Pool, txg: int | None):
 
 
 def dataset_objset(pool: Pool, name: str, txg: int | None):
-    from zfsrecover.zfs.dsl import Dsl
-    from zfsrecover.zfs.objset import Objset
+    from zesus.zfs.dsl import Dsl
+    from zesus.zfs.objset import Objset
     for ub in pool.uberblocks:
         if txg is not None and ub.txg != txg:
             continue
@@ -152,8 +152,8 @@ def main() -> int:
         for u in pool.uberblocks:
             print(f"txg {u.txg:>9}  {ts(u.timestamp)}  ck={'ok' if u.checksum_ok else 'BAD'}  {u.rootbp.describe()}")
     elif a.cmd == "history":
-        from zfsrecover.zfs.history import read_history
-        from zfsrecover.zfs.zap import read_zap
+        from zesus.zfs.history import read_history
+        from zesus.zfs.zap import read_zap
         pool = pool_of(src)
         _, mos = mos_at(pool, None)
         hist = read_history(mos.object(read_zap(mos.object(1))["history"]))
@@ -162,7 +162,7 @@ def main() -> int:
             if not a.grep or a.grep.lower() in line.lower():
                 print(line)
     elif a.cmd == "datasets":
-        from zfsrecover.zfs.dsl import Dsl
+        from zesus.zfs.dsl import Dsl
         pool = pool_of(src)
         ub, mos = mos_at(pool, a.txg)
         print(f"# uberblock txg {ub.txg}")
@@ -182,7 +182,7 @@ def main() -> int:
     elif a.cmd == "bp":
         print(blkptr.parse(bytes.fromhex(a.hex)).describe())
     elif a.cmd in ("objset", "zap"):
-        from zfsrecover.zfs.zap import read_zap
+        from zesus.zfs.zap import read_zap
         pool = pool_of(src)
         if a.dataset:
             os_ = dataset_objset(pool, a.dataset, a.txg)
@@ -205,8 +205,8 @@ def main() -> int:
     elif a.cmd == "carve-sample":
         from collections import Counter
 
-        from zfsrecover.carve.classify import PoolLimits
-        from zfsrecover.carve.scanner import carve_chunk
+        from zesus.carve.classify import PoolLimits
+        from zesus.carve.scanner import carve_chunk
         pool = pool_of(src)
         im = pool.vdev_images[0]
         top = pool.vdevs.top[0]

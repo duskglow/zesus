@@ -38,7 +38,7 @@ from .sparse import make_sparse
 
 log = logging.getLogger(__name__)
 
-GAP_PATTERN = b"<<ZFSRECOVER:UNRECOVERABLE>>\n"
+GAP_PATTERN = b"<<ZESUS:UNRECOVERABLE>>\n"
 
 
 @dataclass
@@ -418,13 +418,13 @@ class Extractor:
         outs = old + [{**r.__dict__, "gaps": [g.__dict__ for g in r.gaps], "lost_bytes": r.lost_bytes}
                       for r in self.records]
         summary = {s: sum(1 for o in outs if o["status"] == s) for s in ("full", "partial", "none")}
-        path.write_text(json.dumps({"tool": "zfs-forensic-recovery", "written_at": now(),
+        path.write_text(json.dumps({"tool": "zesus", "written_at": now(),
                                     "summary": summary, **(extra or {}), "outputs": outs}, indent=1), encoding="utf-8")
         return path
 
 
 def write_ddrescue_map(path: Path, size: int, gaps: Iterable[GapRecord]) -> None:
-    lines = ["# Mapfile. Created by zfs-forensic-recovery", "# current_pos  current_status  current_pass",
+    lines = ["# Mapfile. Created by zesus", "# current_pos  current_status  current_pass",
              "0x00000000     +               1", "#      pos        size  status"]
     pos = 0
     for g in sorted(gaps, key=lambda g: g.offset):

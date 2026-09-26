@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
-from zfsrecover.carve.reconstruct import VolumeReconstructor
+from zesus.carve.reconstruct import VolumeReconstructor
 
 
 def make(sigs: dict[str, set]) -> VolumeReconstructor:

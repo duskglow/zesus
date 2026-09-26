@@ -6,7 +6,7 @@ does not change. See `examples/plugin-template/` for a complete, installable ske
 ## Contract
 
 ```python
-from zfsrecover.fs.api import FilesystemPlugin, FsHandle, FsInfo, Entry, Extent
+from zesus.fs.api import FilesystemPlugin, FsHandle, FsInfo, Entry, Extent
 
 class XfsPlugin(FilesystemPlugin):
     name = "xfs"
@@ -26,8 +26,8 @@ class XfsHandle(FsHandle):
 ```
 
 ```toml
-[project.entry-points."zfsrecover.filesystems"]
-xfs = "zfsrecover_xfs:XfsPlugin"
+[project.entry-points."zesus.filesystems"]
+xfs = "zesus_xfs:XfsPlugin"
 ```
 
 ## Rules
@@ -48,8 +48,8 @@ xfs = "zfsrecover_xfs:XfsPlugin"
 ## Signature-only identifiers
 
 If full inventory is out of scope, an `Identifier` (entry-point group
-`zfsrecover.identifiers`) still lets users see and extract the filesystem as an image.
-See `zfsrecover/fs/identify/__init__.py`.
+`zesus.identifiers`) still lets users see and extract the filesystem as an image.
+See `zesus/fs/identify/__init__.py`.
 
 ## Testing
 

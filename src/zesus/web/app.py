@@ -1,6 +1,6 @@
 """Optional local web UI: browse a map and queue extractions.
 
-    zfsrecover web MAP [--source IMAGE] [--port 8765]
+    zesus web MAP [--source IMAGE] [--port 8765]
 
 It binds to 127.0.0.1 only. The map is opened read-only, and extraction jobs run in a
 background thread using the same engine as the CLI.
@@ -29,7 +29,7 @@ def create_app(map_path: str, source: str | None = None):
 
     from ..map.db import MapDB
 
-    app = FastAPI(title="zfs-forensic-recovery", docs_url=None, redoc_url=None)
+    app = FastAPI(title="zesus", docs_url=None, redoc_url=None)
     lock = threading.Lock()
     jobs: dict[str, dict[str, Any]] = {}
 
@@ -45,7 +45,7 @@ def create_app(map_path: str, source: str | None = None):
 
     @app.get("/", response_class=HTMLResponse)
     def index() -> str:
-        return resources.files("zfsrecover.web").joinpath("index.html").read_text(encoding="utf-8")
+        return resources.files("zesus.web").joinpath("index.html").read_text(encoding="utf-8")
 
     @app.get("/api/overview")
     def overview() -> dict:

@@ -7,8 +7,8 @@ import shutil
 
 import pytest
 
-from zfsrecover.errors import SourceWriteAttempt
-from zfsrecover.io import RawSource, guard
+from zesus.errors import SourceWriteAttempt
+from zesus.io import RawSource, guard
 
 
 @pytest.fixture
@@ -92,7 +92,7 @@ def test_io_package_has_no_write_calls():
     import re
     from pathlib import Path
 
-    import zfsrecover.io as io_pkg
+    import zesus.io as io_pkg
     root = Path(io_pkg.__file__).parent
     bad = re.compile(r"\bos\.(write|pwrite|ftruncate|truncate)\(|\.write\(|open\([^)]*['\"][wa+]")
     for f in root.glob("*.py"):

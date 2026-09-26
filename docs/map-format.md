@@ -1,6 +1,6 @@
 # The SQLite map
 
-The authoritative schema is `src/zfsrecover/map/schema.sql`, which is commented. The map
+The authoritative schema is `src/zesus/map/schema.sql`, which is commented. The map
 is an **index**: it never holds file contents. The one exception is small metadata values
 (pool config, properties, history records). Useful queries:
 
@@ -23,5 +23,5 @@ SELECT file_offset, length, volume_offset, kind, status FROM fs_extents
 ```
 
 `volume_spans` rows hold packed binary data (level-1 block pointers plus per-slot choice
-and status). Use `zfsrecover.volume.logical.LogicalVolume` rather than decoding them by
+and status). Use `zesus.volume.logical.LogicalVolume` rather than decoding them by
 hand.

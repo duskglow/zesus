@@ -14,7 +14,7 @@ def filesystem_plugins() -> list[FilesystemPlugin]:
     from .ext4 import Ext4Plugin
     plugins: list[FilesystemPlugin] = [Ext4Plugin()]
     names = {p.name for p in plugins}
-    for ep in entry_points(group="zfsrecover.filesystems"):
+    for ep in entry_points(group="zesus.filesystems"):
         if ep.name in names:
             continue
         try:
@@ -30,7 +30,7 @@ def filesystem_plugins() -> list[FilesystemPlugin]:
 def identifiers() -> list[Identifier]:
     from .identify import BUILTIN
     ids: list[Identifier] = list(BUILTIN)
-    for ep in entry_points(group="zfsrecover.identifiers"):
+    for ep in entry_points(group="zesus.identifiers"):
         try:
             obj = ep.load()
             ids.append(obj() if isinstance(obj, type) else obj)

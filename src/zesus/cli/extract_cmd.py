@@ -1,4 +1,4 @@
-"""`zfsrecover extract` and `zfsrecover ls`."""
+"""`zesus extract` and `zesus ls`."""
 
 from __future__ import annotations
 
@@ -11,7 +11,7 @@ from pathlib import Path
 
 from .. import log as logsetup
 
-log = logging.getLogger("zfsrecover")
+log = logging.getLogger("zesus")
 
 
 def add_extract_parser(sub) -> None:

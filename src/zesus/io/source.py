@@ -3,10 +3,10 @@
 ``ReadOnlySource`` is the *only* way the rest of the package touches the evidence.
 It deliberately has no write/truncate/flush methods. The underlying descriptor is
 opened with ``O_RDONLY``, so writing through it fails at the OS level even if someone
-bypasses this class. The path is also registered with :mod:`zfsrecover.io.guard`.
+bypasses this class. The path is also registered with :mod:`zesus.io.guard`.
 
 Other kinds of source (E01, split raw, AFF4...) can be added as plugins through the
-``zfsrecover.sources`` entry-point group. They only need to subclass
+``zesus.sources`` entry-point group. They only need to subclass
 :class:`ReadOnlySource`.
 """
 

@@ -5,8 +5,8 @@ import uuid
 import zlib
 
 from tests.conftest import MemDevice
-from zfsrecover.map.db import MapDB
-from zfsrecover.partitions import detect
+from zesus.map.db import MapDB
+from zesus.partitions import detect
 
 
 def make_gpt(size: int, parts: list[tuple[int, int, str, str]]) -> bytes:
@@ -55,7 +55,7 @@ def test_mbr_with_logical():
 
 
 def test_coverage_lookup(tmp_path):
-    from zfsrecover.volume.coverage import Coverage
+    from zesus.volume.coverage import Coverage
     db = MapDB(tmp_path / "m.sqlite")
     db.execute("INSERT INTO pools(id,name,guid) VALUES(1,'p','1')")
     db.execute("INSERT INTO volumes(id,name,volblocksize,n_blocks) VALUES(1,'v',16384,100)")
@@ -75,7 +75,7 @@ def test_coverage_lookup(tmp_path):
 
 
 def test_lost_ranges(tmp_path):
-    from zfsrecover.volume.coverage import Coverage
+    from zesus.volume.coverage import Coverage
     db = MapDB(tmp_path / "m.sqlite")
     db.execute("INSERT INTO pools(id,name,guid) VALUES(1,'p','1')")
     db.execute("INSERT INTO volumes(id,name,volblocksize,n_blocks) VALUES(1,'v',1024,20)")

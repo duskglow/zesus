@@ -9,7 +9,7 @@ The hook intercepts every ``open`` performed through Python (builtin ``open``,
 resolves to a protected path and the operation could modify it, ``SourceWriteAttempt``
 is raised *before* the operation happens.
 
-This is defence in depth: :class:`zfsrecover.io.source.ReadOnlySource` already opens
+This is defence in depth: :class:`zesus.io.source.ReadOnlySource` already opens
 sources with ``O_RDONLY`` and exposes no write methods. The guard also catches bugs
 elsewhere in the code, such as an extractor mistakenly pointed at the source path.
 """

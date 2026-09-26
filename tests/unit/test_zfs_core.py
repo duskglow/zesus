@@ -10,10 +10,10 @@ import lz4.block
 import numpy as np
 import pytest
 
-from zfsrecover.carve.classify import PoolLimits, classify
-from zfsrecover.carve.fastsum import fletcher4_many
-from zfsrecover.zfs import blkptr, checksum, compress, nvlist, zap
-from zfsrecover.zfs.constants import ChecksumType, Compression, DmuType
+from zesus.carve.classify import PoolLimits, classify
+from zesus.carve.fastsum import fletcher4_many
+from zesus.zfs import blkptr, checksum, compress, nvlist, zap
+from zesus.zfs.constants import ChecksumType, Compression, DmuType
 
 # ---------------------------------------------------------------- nvlist encoders (test-only)
 

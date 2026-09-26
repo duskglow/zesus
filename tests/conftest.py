@@ -50,7 +50,7 @@ def ext4_inline() -> MemDevice:
 
 @pytest.fixture
 def test_image() -> str:
-    p = os.environ.get("ZFR_TEST_IMAGE")
+    p = os.environ.get("ZESUS_TEST_IMAGE")
     if not p or not os.path.exists(p):
-        pytest.skip("set ZFR_TEST_IMAGE to a real ZFS image to run integration tests")
+        pytest.skip("set ZESUS_TEST_IMAGE to a real ZFS image to run integration tests")
     return p

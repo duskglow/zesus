@@ -1,4 +1,4 @@
--- zfs-forensic-recovery map, schema version 1.
+-- Zesus map, schema version 1.
 -- The map is an INDEX into the source image. It holds locations, sizes, checksums and
 -- interpretations, never file contents.
 -- Offsets named *_phys are absolute byte offsets in the source. Offsets named dva_*
@@ -199,7 +199,7 @@ CREATE TABLE IF NOT EXISTS volume_roots (
 --   candidates  n x 129 bytes: raw 128-byte blkptr of an L1 block + 1 provenance byte
 --               (0 = pointed to by a verified parent, 1 = carved and placed by matching)
 --   choice      one byte per slot: index of the candidate supplying that slot (255 = none)
---   status      one byte per slot: zfsrecover.map.codes.BlockStatus
+--   status      one byte per slot: zesus.map.codes.BlockStatus
 CREATE TABLE IF NOT EXISTS volume_spans (
     volume_id   INTEGER NOT NULL REFERENCES volumes(id),
     span        INTEGER NOT NULL,

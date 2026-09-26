@@ -1,8 +1,8 @@
 """Command-line interface.
 
-    zfsrecover scan IMAGE -o MAP [--phases ...]    (also: zfsrecover-scan)
-    zfsrecover info MAP
-    zfsrecover extract MAP IMAGE ...               (also: zfsrecover-extract)
+    zesus scan IMAGE -o MAP [--phases ...]    (also: zesus-scan)
+    zesus info MAP
+    zesus extract MAP IMAGE ...               (also: zesus-extract)
 """
 
 from __future__ import annotations
@@ -15,7 +15,7 @@ from pathlib import Path
 from .. import __version__
 from .. import log as logsetup
 
-log = logging.getLogger("zfsrecover")
+log = logging.getLogger("zesus")
 
 DEFAULT_PHASES = ["history", "datasets", "carve", "reconstruct", "verify", "contents"]
 
@@ -55,7 +55,7 @@ def cmd_scan(args: argparse.Namespace) -> int:
 
     mappath = Path(args.map)
     logsetup.setup(args.verbose, args.log or mappath.with_suffix(".log.jsonl"))
-    log.info("zfs-forensic-recovery %s: scan %s -> %s", __version__, args.source, mappath)
+    log.info("zesus %s: scan %s -> %s", __version__, args.source, mappath)
     src = RawSource(args.source)
     db = MapDB(mappath)
     stop = Stop()
@@ -104,13 +104,13 @@ def cmd_web(args: argparse.Namespace) -> int:
     try:
         from ..web.app import serve
     except ImportError as exc:
-        raise SystemExit(f"web UI needs extra packages: pip install 'zfs-forensic-recovery[web]' ({exc})") from exc
+        raise SystemExit(f"web UI needs extra packages: pip install 'zesus[web]' ({exc})") from exc
     serve(args.map, args.source, args.host, args.port)
     return 0
 
 
 def build_parser() -> argparse.ArgumentParser:
-    p = argparse.ArgumentParser(prog="zfsrecover", description="ZFS forensic scanner and extractor")
+    p = argparse.ArgumentParser(prog="zesus", description="ZFS forensic scanner and extractor")
     p.add_argument("--version", action="version", version=__version__)
     p.add_argument("-v", "--verbose", action="count", default=0)
     p.add_argument("-q", "--quiet", dest="verbose", action="store_const", const=-1)

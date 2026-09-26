@@ -15,7 +15,7 @@ Minimal plugin::
 
 registered in the plugin's ``pyproject.toml``::
 
-    [project.entry-points."zfsrecover.filesystems"]
+    [project.entry-points."zesus.filesystems"]
     myfs = "my_package:MyFsPlugin"
 """
 
@@ -145,7 +145,7 @@ class FilesystemPlugin(ABC):
 
 class Identifier(ABC):
     """Signature-only detection (no inventory) for filesystems/containers without a
-    full plugin. Registered under ``zfsrecover.identifiers``."""
+    full plugin. Registered under ``zesus.identifiers``."""
     name: str = "?"
 
     @abstractmethod

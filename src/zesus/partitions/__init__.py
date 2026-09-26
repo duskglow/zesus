@@ -9,7 +9,7 @@ A scheme plugin is a class with:
 Plugins read through a ``BlockReader`` (``pread(offset, length) -> bytes``). They receive
 no file handles and have no access to the database.
 
-Third-party schemes register under the ``zfsrecover.partitions`` entry-point group.
+Third-party schemes register under the ``zesus.partitions`` entry-point group.
 """
 
 from __future__ import annotations
@@ -56,7 +56,7 @@ def load_schemes() -> list[PartitionScheme]:
     from .mbr import MbrScheme
     schemes: list[PartitionScheme] = [GptScheme(), MbrScheme()]
     seen = {s.name for s in schemes}
-    for ep in entry_points(group="zfsrecover.partitions"):
+    for ep in entry_points(group="zesus.partitions"):
         if ep.name in seen:
             continue
         try:
