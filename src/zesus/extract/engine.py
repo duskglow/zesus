@@ -200,7 +200,10 @@ class Extractor:
             else:
                 self._gap_blocks(rec, a_blk, b_blk, bs, start, end, st)
         if covered_to < hi:
-            self._gap_blocks(rec, covered_to, hi, bs, start, end, BlockStatus.NO_METADATA)
+            # past the tree's highest allocated block the volume reads as zeros: a hole
+            tail = min(hi, max(covered_to, tree_end(self.db, volume_id) or hi))
+            if tail > covered_to:
+                self._gap_blocks(rec, covered_to, tail, bs, start, end, BlockStatus.NO_METADATA)
 
     def _fallback_block(self, lv, wl, idx, raw, rec) -> bytes | None:
         """Gang blocks, other copies, older versions: go through the full reader."""
@@ -549,6 +552,17 @@ def estimate_files(db: MapDB, fs_id: int, patterns: list[str] | None = None, sta
             "recoverable_bytes": rec, "lost_bytes": max(0, size - rec), "by_status": by}
 
 
+def tree_end(db: MapDB, volume_id: int) -> int | None:
+    """First block id past the highest block the volume's tree ever allocated, or None when
+    the map does not record it (older maps: the tail is then treated as unmapped)."""
+    r = db.execute("SELECT notes FROM volumes WHERE id=?", (volume_id,)).fetchone()
+    try:
+        m = json.loads(r[0] or "{}").get("tree_maxblkid") if r else None
+    except ValueError:
+        m = None
+    return None if m is None else int(m) + 1
+
+
 def estimate_volume_range(db: MapDB, volume_id: int, start: int, length: int) -> dict:
     """Output size, bytes to read, and bytes that will be gaps, from the coverage table."""
     v = db.execute("SELECT * FROM volumes WHERE id=?", (volume_id,)).fetchone()
@@ -562,7 +576,12 @@ def estimate_volume_range(db: MapDB, volume_id: int, start: int, length: int) ->
         n = min(hi, r["first_blkid"] + r["count"]) - max(lo, r["first_blkid"])
         counts[r["status"]] = counts.get(r["status"], 0) + n
     covered = sum(counts.values())
-    counts["no_metadata"] = counts.get("no_metadata", 0) + max(0, (hi - lo) - covered)
+    uncovered = max(0, (hi - lo) - covered)
+    te = tree_end(db, volume_id)
+    never = max(0, hi - max(lo, te)) if te is not None else 0     # past the tree's last block
+    never = min(never, uncovered)
+    counts["hole"] = counts.get("hole", 0) + never
+    counts["no_metadata"] = counts.get("no_metadata", 0) + uncovered - never
     good = {"ok", "ok_stale", "embedded", "unknown"}
     sparse = {"hole", "discarded"}
     return {"bytes": length, "blocks": hi - lo, "block_size": bs, "by_status": counts,

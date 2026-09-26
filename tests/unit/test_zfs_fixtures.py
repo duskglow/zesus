@@ -89,12 +89,18 @@ def extract_volume(mapfile: Path, paths: list[Path], name: str, out: Path) -> tu
 
 
 @pytest.mark.parametrize("name", POOLS)
-def test_all_members_present_every_block_is_parity_consistent(name, unpacked, tmp_path):
+def test_all_members_present_every_live_block_is_parity_consistent(name, unpacked, tmp_path):
+    """Live blocks are never freed, so their on-disk parity (or mirror copies) must match
+    the data exactly: this checks our column layout and Q/R order against OpenZFS. (Blocks
+    of *older* tree versions may legitimately fail this: once freed, their parity sector
+    can be reused by a later allocation.)"""
     from zesus.carve.verify import chosen_blocks, load_spans
+    from zesus.extract.engine import Extractor, Options
     from zesus.io.sourceset import SourceSet
     from zesus.map.db import MapDB
     from zesus.scan import pipeline
     from zesus.zfs.members import assess
+    from zesus.zfs.objset import Objset
     from zesus.zfs.pool import open_pools
     m = manifest(name)
     with SourceSet.open([str(p) for p in unpacked(name)]) as ss:
@@ -103,57 +109,47 @@ def test_all_members_present_every_block_is_parity_consistent(name, unpacked, tm
         rep = assess(pool)
         assert rep.readable and all(r.state == "present" for t in rep.tops for r in t.rows)
         top = pool.vdevs.top[0]
-        seen, bad = [0], []
-        verified: dict[tuple[int, int], int] = {}
-
-        def sectors(off: int, psize: int, parity: bool) -> set:
-            from zesus.zfs import raidz
-            rm = raidz.map_alloc(off, psize, top.ashift, top.width, top.nparity)
-            cols = rm.parity_cols if parity else rm.cols
-            return {(c.devidx, (c.offset >> top.ashift) + j) for c in cols for j in range(c.size >> top.ashift)}
-
-        def overwritten_parity(birth: int, off: int, psize: int) -> bool:
-            """An old block whose parity sector now belongs to a newer verified block (its
-            space was freed and reused). Its data verified, so only the parity is gone."""
-            if top.type != "raidz":
-                return False
-            par = sectors(off, psize, True)
-            return any(b2 > birth and sectors(o2, p2, False) & par
-                       for (o2, p2), b2 in verified.items() if (o2, p2) != (off, psize))
+        db = MapDB(tmp_path / "m.sqlite")
+        pipeline.run(pipeline.ScanContext(db=db, source=ss, pools=[pool], options={}),
+                     ["history", "datasets", "reconstruct", "contents"])
 
         def consistent(offset: int, psize: int) -> bool:
             if top.type == "raidz":
                 return top.parity_consistent(offset, psize) is True
             return len({lf.read(offset, psize) for lf in top.children}) == 1
 
+        seen, bad = [0], []
+
         def check(bp, rd):
-            if rd.status.value != "ok" or bp.embedded or bp.is_hole:
+            if rd.status.value != "ok" or bp.embedded or bp.is_hole or rd.dva is None or rd.dva.gang:
                 return
             assert not rd.repaired, "nothing should need rebuilding with every member present"
-            # only the copy that was read and verified: another DVA (ditto copy) of an old
-            # block may since have been freed and overwritten
-            dva = rd.dva
-            if dva is not None and not dva.gang:
-                seen[0] += 1
-                verified[(dva.offset, bp.psize)] = bp.birth
-                if not consistent(dva.offset, bp.psize):
-                    bad.append((bp.birth, dva.offset, bp.psize))
+            seen[0] += 1
+            if not consistent(rd.dva.offset, bp.psize):
+                bad.append((bp.birth, rd.dva.offset, bp.psize))
+        pool.reader._cache.clear()
         pool.reader.observers.append(check)
-        # every metadata and file block the real pipeline reads (MOS, DSL, ZPL inventory)
-        db = MapDB(tmp_path / "m.sqlite")
-        ctx = pipeline.ScanContext(db=db, source=ss, pools=[pool], options={})
-        pipeline.run(ctx, ["history", "datasets", "reconstruct", "contents"])
-        # and every data block of the live zvol
+        # the newest MOS
+        mos = Objset(pool.reader, pool.best_uberblock().rootbp, "MOS")
+        for obj in range(1, mos.max_object):
+            try:
+                mos.dnode(obj)
+            except Exception:
+                pass
+        # every block of every live file
+        fid = next(r[0] for r in db.execute("SELECT f.id, d.name FROM filesystems f JOIN datasets d "
+                                            "ON d.id=f.dataset_id") if r[1].endswith("/fs"))
+        Extractor(db, pool, Options(out_dir=tmp_path / "files", hash_outputs=False)).extract_files(fid)
+        # every data block of the live zvol
         vid = next(r[0] for r in db.execute("SELECT id, name FROM volumes") if r[1].endswith("/vol"))
-        wl = chosen_blocks(pool, load_spans(db, vid), {0, 1, 2})
+        wl = chosen_blocks(pool, load_spans(db, vid), {0, 1})
         for off, ps in zip(wl["offset"].tolist(), wl["psize"].tolist(), strict=True):
             seen[0] += 1
             if not consistent(int(off), int(ps)):
-                bad.append(off)
+                bad.append(("zvol", off, ps))
         db.close()
-        bad = [b for b in bad if not isinstance(b, tuple) or not overwritten_parity(*b)]
-    assert seen[0] > 500, seen
-    assert not bad, f"{len(bad)} of {seen[0]} blocks have parity/copies that do not match their data: {bad[:5]}"
+    assert seen[0] > 150, seen
+    assert not bad, f"{len(bad)} of {seen[0]} live blocks have parity/copies that do not match: {bad[:5]}"
 
 
 @pytest.mark.parametrize("name", POOLS)

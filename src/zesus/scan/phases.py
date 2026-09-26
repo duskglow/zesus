@@ -367,7 +367,10 @@ def _reconstruct_one(ctx: ScanContext, rec, ds: dict, roots: list, n_carved: int
             "dataset_id": ds["id"], "name": ds["name"], "volsize": volsize,
             "volblocksize": ref.dnode.datablksz, "nlevels": ref.dnode.nlevels,
             "root_txg": max(r.txg for r in roots), "n_blocks": rec.maxblkid + 1, "status": "mapped",
-            "notes": j({"stats": rec.stats.__dict__, "limit_blocks": limit})})
+            # tree_maxblkid: the highest block the tree ever allocated. ZFS reads anything
+            # past it as zeros, so extraction treats that tail as never written.
+            "notes": j({"stats": rec.stats.__dict__, "limit_blocks": limit,
+                        "tree_maxblkid": ref.dnode.maxblkid})})
         for r in roots:
             ctx.db.insert("volume_roots", {"volume_id": vid, "txg": r.txg, "top_bp": r.top_bp.raw,
                                            "provenance": r.provenance, "usable": 1})

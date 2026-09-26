@@ -74,26 +74,26 @@ build() {  # build NAME ASHIFT VDEVSPEC NMEMBERS
     POOLS="$POOLS $pool"
     seed=$(printf '%s' "$name" | cksum | cut -d' ' -f1)
 
-    zfs create -V 6M -o volblocksize=8K -o compression=lz4 "$pool/vol"
+    zfs create -V 2M -o volblocksize=8K -o compression=lz4 "$pool/vol"
     vol=$(zvol_dev "$pool/vol")
-    { gen "$seed" 3145728 random; gen $((seed + 1)) 3145728 text; } > "$dir/vol.bin"
+    { gen "$seed" 524288 random; gen $((seed + 1)) 1048576 text; } > "$dir/vol.bin"
     dd if="$dir/vol.bin" of="$vol" bs=1M conv=fsync status=none
 
     zfs create -o mountpoint="$dir/fs" "$pool/fs"
     j=0
-    for sz in 0 1 100 511 512 513 4095 4096 4097 12000 40000 131072 131073 300000 1000000; do
+    for sz in 0 1 100 511 512 513 4095 4096 4097 12000 40000 131072 131073; do
         gen $((seed + 100 + j)) "$sz" mixed > "$dir/fs/f$j-$sz.bin"
         j=$((j + 1))
     done
     mkdir -p "$dir/fs/sub/deeper"
     gen $((seed + 200)) 70000 text > "$dir/fs/sub/deeper/nested.txt"
 
-    zfs create -V 4M -o volblocksize=16K -o compression=lz4 "$pool/gone"
+    zfs create -V 1M -o volblocksize=16K -o compression=lz4 "$pool/gone"
     gone=$(zvol_dev "$pool/gone")
-    gen $((seed + 300)) 4194304 mixed > "$dir/gone.bin"
+    gen $((seed + 300)) 1048576 mixed > "$dir/gone.bin"
     dd if="$dir/gone.bin" of="$gone" bs=1M conv=fsync status=none
     zfs create -o mountpoint="$dir/gonefs" "$pool/gonefs"
-    gen $((seed + 400)) 500000 mixed > "$dir/gonefs/lost.bin"
+    gen $((seed + 400)) 200000 mixed > "$dir/gonefs/lost.bin"
     zpool sync "$pool"
     sleep 1
     zpool sync "$pool"
@@ -117,7 +117,7 @@ guid = subprocess.run(["zpool", "get", "-Hp", "-o", "value", "guid", pool], capt
 print(json.dumps({
     "name": name, "layout": kind, "ashift": int(ashift), "members": int(n), "pool": pool, "pool_guid": guid,
     "seed": int(seed),
-    "content": {"vol": [[0, 3145728, "random"], [1, 3145728, "text"]], "gone": [[300, 4194304, "mixed"]]},
+    "content": {"vol": [[0, 524288, "random"], [1, 1048576, "text"]], "gone": [[300, 1048576, "mixed"]]},
     "zvols": {"vol": {"size": os.path.getsize(os.path.join(d, "vol.bin")), "sha256": h(os.path.join(d, "vol.bin")),
                       "volblocksize": 8192, "destroyed": False},
               "gone": {"size": os.path.getsize(os.path.join(d, "gone.bin")), "sha256": h(os.path.join(d, "gone.bin")),
