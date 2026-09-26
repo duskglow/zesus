@@ -345,6 +345,18 @@ def _match_history(ctx: ScanContext, pid: int, lo: int, hi: int, volsize: int) -
 
 def _reconstruct_one(ctx: ScanContext, rec, ds: dict, roots: list, n_carved: int, limit) -> None:
     from ..carve.verify import summarize
+    # A single-level tree (a just-created, still empty zvol) has no level-1 blocks to map:
+    # its dnode points at no more than three data blocks. Such versions are skipped.
+    flat = [r for r in roots if r.geometry[0] < 2]
+    if flat:
+        roots = [r for r in roots if r.geometry[0] >= 2]
+        n_carved = sum(1 for r in roots if not r.provenance.startswith("ring"))
+        log.info("volume %s: skipping %d single-level tree version(s) (empty or at most 3 blocks)",
+                 ds["name"], len(flat))
+        if not roots:
+            ctx.db.event("warning", "reconstruct", f"{ds['name']}: only single-level tree versions "
+                         "were found (an empty or tiny zvol); nothing to map", txgs=[r.txg for r in flat])
+            return
     log.info("volume %s: %d tree versions (%d from ring, %d carved); newest txg %d",
              ds["name"], len(roots), len(roots) - n_carved, n_carved, max(r.txg for r in roots))
     spans, ref = rec.build(roots, limit_blocks=limit)

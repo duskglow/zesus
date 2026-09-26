@@ -86,9 +86,10 @@ def record_source(ctx: ScanContext) -> None:
 
 def ensure_pools(ctx: ScanContext) -> None:
     """Open pools (cheap: labels only) and make sure each has a row in the map."""
-    if ctx.pools:
+    if ctx.pools and all(p.guid in ctx.pool_ids for p in ctx.pools):
         return
-    ctx.pools = open_pools(ctx.source)
+    if not ctx.pools:
+        ctx.pools = open_pools(ctx.source)
     if not ctx.pools:
         log.error("no ZFS pool labels found in %s", ctx.source.name)
     known_pools = {r[0] for r in ctx.db.execute("SELECT guid FROM pools")}

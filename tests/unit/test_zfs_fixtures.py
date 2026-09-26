@@ -89,10 +89,12 @@ def extract_volume(mapfile: Path, paths: list[Path], name: str, out: Path) -> tu
 
 
 @pytest.mark.parametrize("name", POOLS)
-def test_all_members_present_every_block_is_parity_consistent(name, unpacked):
+def test_all_members_present_every_block_is_parity_consistent(name, unpacked, tmp_path):
+    from zesus.carve.verify import chosen_blocks, load_spans
     from zesus.io.sourceset import SourceSet
+    from zesus.map.db import MapDB
+    from zesus.scan import pipeline
     from zesus.zfs.members import assess
-    from zesus.zfs.objset import Objset
     from zesus.zfs.pool import open_pools
     m = manifest(name)
     with SourceSet.open([str(p) for p in unpacked(name)]) as ss:
@@ -101,30 +103,57 @@ def test_all_members_present_every_block_is_parity_consistent(name, unpacked):
         rep = assess(pool)
         assert rep.readable and all(r.state == "present" for t in rep.tops for r in t.rows)
         top = pool.vdevs.top[0]
-        seen, bad = 0, []
+        seen, bad = [0], []
+        verified: dict[tuple[int, int], int] = {}
+
+        def sectors(off: int, psize: int, parity: bool) -> set:
+            from zesus.zfs import raidz
+            rm = raidz.map_alloc(off, psize, top.ashift, top.width, top.nparity)
+            cols = rm.parity_cols if parity else rm.cols
+            return {(c.devidx, (c.offset >> top.ashift) + j) for c in cols for j in range(c.size >> top.ashift)}
+
+        def overwritten_parity(birth: int, off: int, psize: int) -> bool:
+            """An old block whose parity sector now belongs to a newer verified block (its
+            space was freed and reused). Its data verified, so only the parity is gone."""
+            if top.type != "raidz":
+                return False
+            par = sectors(off, psize, True)
+            return any(b2 > birth and sectors(o2, p2, False) & par
+                       for (o2, p2), b2 in verified.items() if (o2, p2) != (off, psize))
+
+        def consistent(offset: int, psize: int) -> bool:
+            if top.type == "raidz":
+                return top.parity_consistent(offset, psize) is True
+            return len({lf.read(offset, psize) for lf in top.children}) == 1
 
         def check(bp, rd):
-            nonlocal seen
             if rd.status.value != "ok" or bp.embedded or bp.is_hole:
                 return
-            for dva in bp.valid_dvas:
-                if dva.gang:
-                    continue
-                seen += 1
-                if top.type == "raidz" and top.parity_consistent(dva.offset, bp.psize) is not True:
-                    bad.append(dva)
-                if top.type == "mirror" and len({lf.read(dva.offset, bp.psize) for lf in top.children}) != 1:
-                    bad.append(dva)
             assert not rd.repaired, "nothing should need rebuilding with every member present"
+            # only the copy that was read and verified: another DVA (ditto copy) of an old
+            # block may since have been freed and overwritten
+            dva = rd.dva
+            if dva is not None and not dva.gang:
+                seen[0] += 1
+                verified[(dva.offset, bp.psize)] = bp.birth
+                if not consistent(dva.offset, bp.psize):
+                    bad.append((bp.birth, dva.offset, bp.psize))
         pool.reader.observers.append(check)
-        mos = Objset(pool.reader, pool.best_uberblock().rootbp, "MOS")
-        for obj in range(1, min(mos.max_object, 200)):
-            try:
-                mos.dnode(obj)
-            except Exception:
-                pass
-        assert seen > 20
-        assert not bad, f"{len(bad)} of {seen} blocks have parity that does not match their data"
+        # every metadata and file block the real pipeline reads (MOS, DSL, ZPL inventory)
+        db = MapDB(tmp_path / "m.sqlite")
+        ctx = pipeline.ScanContext(db=db, source=ss, pools=[pool], options={})
+        pipeline.run(ctx, ["history", "datasets", "reconstruct", "contents"])
+        # and every data block of the live zvol
+        vid = next(r[0] for r in db.execute("SELECT id, name FROM volumes") if r[1].endswith("/vol"))
+        wl = chosen_blocks(pool, load_spans(db, vid), {0, 1, 2})
+        for off, ps in zip(wl["offset"].tolist(), wl["psize"].tolist(), strict=True):
+            seen[0] += 1
+            if not consistent(int(off), int(ps)):
+                bad.append(off)
+        db.close()
+        bad = [b for b in bad if not isinstance(b, tuple) or not overwritten_parity(*b)]
+    assert seen[0] > 500, seen
+    assert not bad, f"{len(bad)} of {seen[0]} blocks have parity/copies that do not match their data: {bad[:5]}"
 
 
 @pytest.mark.parametrize("name", POOLS)
@@ -165,11 +194,15 @@ def test_one_loss_too_many_gives_gaps_never_wrong_bytes(name, unpacked, tmp_path
 
 
 @pytest.mark.parametrize("name", POOLS)
-def test_destroyed_zvol_is_carved_and_recovered(name, unpacked, tmp_path):
+@pytest.mark.parametrize("ignore_ring", [False, True], ids=["ring+carved", "carved-only"])
+def test_destroyed_zvol_is_carved_and_recovered(name, ignore_ring, unpacked, tmp_path):
+    from zesus.cli.main import main
     m = manifest(name)
     paths = unpacked(name)
     mapfile = tmp_path / "m.sqlite"
-    scan(paths, mapfile, "history,datasets,carve,reconstruct,verify")
+    args = ["-q", "scan", *map(str, paths), "-o", str(mapfile), "--phases",
+            "history,datasets,carve,reconstruct,verify", "--workers", "1"]
+    assert main(args + (["--ignore-ring"] if ignore_ring else [])) == 0
     img, info = extract_volume(mapfile, paths, "gone", tmp_path / "out")
     want = content(m, "gone")
     assert info["status"] == "full", info

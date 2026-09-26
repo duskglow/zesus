@@ -20,14 +20,17 @@ set -eu
 HERE=$(cd "$(dirname "$0")/.." && pwd)
 OUT="$HERE/tests/fixtures/zfs"
 TMP=$(mktemp -d /tmp/zfx.XXXXXX)
-SIZE=${ZFX_SIZE:-80M}          # per member (the ZFS minimum is 64M)
+SIZE=${ZFX_SIZE:-96M}          # per member (the ZFS minimum is 64M, after its partitioning)
 POOLS=""
+LOOPS=""
 cleanup() {
     for p in $POOLS; do zpool destroy -f "$p" 2>/dev/null || true; done
+    for l in $LOOPS; do losetup -d "$l" 2>/dev/null || true; done
     rm -rf "$TMP"
 }
 trap cleanup EXIT
 command -v zpool >/dev/null || { echo "zpool not found: install zfsutils-linux" >&2; exit 1; }
+command -v losetup >/dev/null || { echo "losetup not found (util-linux)" >&2; exit 1; }
 [ "$(id -u)" = 0 ] || { echo "run as root (sudo)" >&2; exit 1; }
 mkdir -p "$OUT"
 
@@ -52,11 +55,18 @@ build() {  # build NAME ASHIFT VDEVSPEC NMEMBERS
     pool="zfx_$(echo "$name" | tr '-' '_')"
     dir="$TMP/$name"
     mkdir -p "$dir"
+    # Members are loop devices, not plain files. Under WSL, OpenZFS opens file vdevs from
+    # kernel threads that do not see the distro's filesystem ("cannot create: no such pool
+    # or dataset"). As whole disks, ZFS also partitions them, like real member disks.
     members=""
+    loops=""
     i=0
     while [ $i -lt "$n" ]; do
         truncate -s "$SIZE" "$dir/member$i.img"
-        members="$members $dir/member$i.img"
+        l=$(losetup -f --show "$dir/member$i.img")
+        loops="$loops $l"
+        LOOPS="$LOOPS $l"
+        members="$members $l"
         i=$((i + 1))
     done
     # shellcheck disable=SC2086
@@ -122,6 +132,10 @@ PY
     zfs unmount -a 2>/dev/null || true
     zpool export "$pool"
     POOLS=$(echo "$POOLS" | sed "s/ $pool//")
+    for l in $loops; do
+        losetup -d "$l"
+        LOOPS=$(echo "$LOOPS" | sed "s| $l||")
+    done
 
     rm -rf "$OUT/$name"
     mkdir -p "$OUT/$name"
