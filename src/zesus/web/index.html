@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>ZFS Forensic Recovery</title>
+<title>Zesus</title>
 <style>
 :root {
   --bg: #f7f7f5; --panel: #ffffff; --text: #1d1f21; --muted: #6b7075; --border: #e2e2de;
@@ -53,12 +53,19 @@ input, select { font: inherit; padding: 6px 8px; border: 1px solid var(--border)
 button.primary { background: var(--accent); color: #fff; border: 0; padding: 7px 12px; border-radius: 6px; cursor: pointer; font: inherit; }
 .row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-bottom: 10px; }
 .empty { color: var(--muted); padding: 20px 0; text-align: center; }
+button.ghost { background: none; border: 1px solid var(--border); color: var(--text); padding: 6px 10px;
+               border-radius: 6px; cursor: pointer; font: inherit; }
+.form { display: grid; gap: 8px; margin: 10px 0; }
+.form label { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.form label.chk { color: var(--muted); }
+pre.log { background: var(--bg); border: 1px solid var(--border); border-radius: 6px; padding: 8px; max-height: 180px;
+          overflow: auto; font: 12px var(--mono); white-space: pre-wrap; margin: 6px 0 0; }
 @media (max-width: 640px) { main { padding: 12px; } nav { margin-left: 0; width: 100%; overflow-x: auto; } }
 </style>
 </head>
 <body>
 <header>
-  <h1>ZFS Forensic Recovery</h1>
+  <h1>Zesus <span class="muted" style="font-weight:400">ZFS Emergency Storage Undelete Support</span></h1>
   <span class="src" id="src"></span>
   <nav>
     <button data-tab="overview" class="active">Overview</button>
@@ -79,8 +86,30 @@ button.primary { background: var(--accent); color: #fff; border: 0; padding: 7px
         <select id="st"><option value="">any status</option><option>full</option><option>partial</option><option>none</option></select>
         <button class="primary" id="searchBtn">Search</button>
       </div>
-      <div class="crumbs mono" id="crumbs"></div>
+      <div class="row" style="justify-content:space-between">
+        <div class="crumbs mono" id="crumbs"></div>
+        <button id="sendDirBtn" class="ghost">Send this folder…</button>
+      </div>
       <div class="tablewrap"><table id="listing"></table></div>
+    </div>
+    <div class="card" id="sendPanel" hidden>
+      <h2>Send back with rsync</h2>
+      <p class="muted" id="sendWhat"></p>
+      <div id="sendTools" class="muted"></div>
+      <div class="form">
+        <label>Destination <input id="sDest" placeholder="root@server:/restore/path   or   /local/dir" size="42"></label>
+        <label>ssh options <input id="sSsh" placeholder="-p 22 -i ~/.ssh/id_ed25519" size="30"></label>
+        <label class="chk"><input type="checkbox" id="sSudo"> use sudo on the destination (restores owners)</label>
+        <label class="chk"><input type="checkbox" id="sOver"> overwrite files that already exist there</label>
+        <label class="chk"><input type="checkbox" id="sPart"> include partially recovered files (gaps are zero-filled)</label>
+      </div>
+      <div class="row">
+        <button class="ghost" id="sPreview">Preview (dry run)</button>
+        <button class="primary" id="sGo">Send</button>
+        <button class="ghost" id="sCancel">Close</button>
+      </div>
+      <p class="muted">Files are staged locally, re-verified, sent with rsync, then their original names, modes,
+        times and (with sudo) owners are restored. Unrecoverable files are never sent.</p>
     </div>
   </section>
   <section id="jobs"></section>
@@ -186,10 +215,13 @@ function rowsHtml(list, showPath) {
     `<tr><td class="mono">${e.type === "dir" ? `<a onclick="browse('${esc(e.path).replace(/'/g,"\\'")}')">${esc(showPath ? e.path : e.name)}/</a>` : esc(showPath ? e.path : e.name)}
       ${e.link_target ? `<span class="muted"> → ${esc(e.link_target)}</span>` : ""}${e.deleted ? ' <span class="badge b-none">deleted</span>' : ""}</td>
      <td class="num">${e.type === "file" ? gib(e.size) : ""}</td><td class="muted">${ts(e.mtime)}</td><td>${badge(e.status)}</td>
-     <td><a onclick="queue({kind:'files',fs_id:${curFs},paths:['${esc(e.path).replace(/'/g,"\\'")}']})">extract</a></td></tr>`).join("");
+     <td><a onclick="queue({kind:'files',fs_id:${curFs},paths:['${esc(e.path).replace(/'/g,"\\'")}']})">extract</a>
+       · <a onclick="openSend(['${esc(e.path).replace(/'/g,"\\'")}'])">send</a></td></tr>`).join("");
 }
 
+let curPath = "/";
 async function browse(path) {
+  curPath = path;
   const d = await api(`/api/fs/${curFs}/ls?path=${encodeURIComponent(path)}`);
   const segs = path.split("/").filter(Boolean); let acc = "";
   $("#crumbs").innerHTML = `<a onclick="browse('/')">/</a>` + segs.map(s => { acc += "/" + s;
@@ -215,11 +247,39 @@ async function queue(req) {
   document.querySelector('nav button[data-tab="jobs"]').click();
 }
 
+let sendPaths = null;
+async function openSend(paths) {
+  sendPaths = paths;
+  const p = $("#sendPanel"); p.hidden = false;
+  $("#sendWhat").textContent = `What: ${paths.join(", ")} (filesystem ${curFs})`;
+  const saved = (() => { try { return JSON.parse(localStorage.getItem("zesus-send") || "{}"); } catch (e) { return {}; } })();
+  $("#sDest").value = saved.dest || ""; $("#sSsh").value = saved.ssh || ""; $("#sSudo").checked = !!saved.sudo;
+  const t = await api("/api/send/tools");
+  $("#sendTools").textContent = t.ok ? `rsync available (${t.mode === "wsl" ? "via WSL" : "native"})` : t.error;
+  p.scrollIntoView({behavior: "smooth"});
+}
+async function doSend(dry) {
+  const req = {fs_id: curFs, paths: sendPaths, dest: $("#sDest").value.trim(), ssh: $("#sSsh").value.trim(),
+               sudo: $("#sSudo").checked, overwrite: $("#sOver").checked, include_partial: $("#sPart").checked,
+               dry_run: dry};
+  if (!req.dest) { alert("Enter a destination."); return; }
+  if (!OV.source) { alert("Start the web UI with --source to enable sending."); return; }
+  try { localStorage.setItem("zesus-send", JSON.stringify({dest: req.dest, ssh: req.ssh, sudo: req.sudo})); } catch (e) {}
+  if (!dry && req.overwrite && !confirm("Overwrite files that already exist at the destination?")) return;
+  try { await api("/api/send", {method: "POST", headers: {"content-type": "application/json"}, body: JSON.stringify(req)}); }
+  catch (e) { alert(e.message); return; }
+  document.querySelector('nav button[data-tab="jobs"]').click();
+}
+$("#sendDirBtn").onclick = () => openSend([curPath]);
+$("#sPreview").onclick = () => doSend(true);
+$("#sGo").onclick = () => doSend(false);
+$("#sCancel").onclick = () => { $("#sendPanel").hidden = true; };
+
 async function renderJobs() {
   const j = await api("/api/jobs");
   $("#jobs").innerHTML = `<div class="card"><h2>Extraction jobs</h2>${j.length ? `<table><tr><th>ID</th><th>What</th><th>State</th><th>Result</th></tr>
     ${j.map(x => `<tr><td class="mono">${x.id}</td><td class="mono">${esc(JSON.stringify(x.request))}</td><td>${badge(x.state)}</td>
-    <td>${esc(x.message)}${(x.outputs||[]).slice(0,20).map(o => `<div class="mono">${badge(o.status)} ${esc(o.path)} ${o.lost_bytes ? "(" + gib(o.lost_bytes) + " lost)" : ""}</div>`).join("")}</td></tr>`).join("")}</table>`
+    <td>${esc(x.message)}${x.log && x.log.length ? `<pre class="log">${esc(x.log.slice(-12).join("\n"))}</pre>` : ""}${(x.outputs||[]).slice(0,20).map(o => `<div class="mono">${badge(o.status)} ${esc(o.path)} ${o.lost_bytes ? "(" + gib(o.lost_bytes) + " lost)" : ""}</div>`).join("")}</td></tr>`).join("")}</table>`
     : '<div class="empty">No jobs yet. Use the "extract" links in Volumes or Files.</div>'}</div>`;
   if (j.some(x => x.state === "running" || x.state === "queued")) setTimeout(() => { if ($("#jobs").classList.contains("active")) renderJobs(); }, 2000);
 }

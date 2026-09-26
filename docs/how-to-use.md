@@ -134,6 +134,33 @@ zesus web case.sqlite --source disk.img      # then open http://127.0.0.1:8765/
 
 ---
 
+## Recipe 2b: "Put the files straight back on the server"
+
+Skip copying things around by hand. `zesus send` stages the recovered files locally (verified
+as usual), rsyncs them to the destination, and then restores their original names, symlinks,
+permissions and timestamps. With `--sudo` it restores owners too.
+
+```bash
+# see what would happen first
+zesus send case.sqlite disk.img --fs 1 --path /home/alice --to root@newserver:/ --dry-run
+
+# then do it (owners need root on the destination: --sudo, with passwordless sudo there)
+zesus send case.sqlite disk.img --fs 1 --path /home/alice --to root@newserver:/ --sudo
+```
+
+* It never overwrites a file that already exists at the destination unless you add
+  `--overwrite`.
+* Partially recovered files stay behind unless you add `--include-partial`.
+* Unrecoverable files are never sent.
+* It is safe to run again: already-staged and already-sent files are skipped.
+* In the web UI: **Files → "send"** on any row, or **"Send this folder…"**. Use the
+  *Preview* button for a dry run.
+* Windows needs rsync and ssh inside WSL (`sudo apt install rsync openssh-client`). Your ssh
+  keys must be set up there too.
+* Staging needs local disk space for the files being sent. Choose where with `--staging`.
+
+---
+
 ## Recipe 3: "I destroyed a ZFS filesystem dataset"
 
 Same scan. The dataset appears in `zesus info` as `destroyed`. If it is still reachable, its

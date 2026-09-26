@@ -29,7 +29,7 @@ def create_app(map_path: str, source: str | None = None):
 
     from ..map.db import MapDB
 
-    app = FastAPI(title="zesus", docs_url=None, redoc_url=None)
+    app = FastAPI(title="Zesus", docs_url=None, redoc_url=None)
     lock = threading.Lock()
     jobs: dict[str, dict[str, Any]] = {}
 
@@ -194,6 +194,65 @@ def create_app(map_path: str, source: str | None = None):
                 job["state"] = "failed"
                 job["message"] = f"{exc}"
                 log.error("job %s failed: %s", jid, traceback.format_exc())
+            job["finished"] = time.time()
+
+        t = threading.Thread(target=run, daemon=True)
+        with lock:
+            jobs[jid] = job
+        t.start()
+        return {"id": jid}
+
+    # ------------------------------------------------------------------ send (rsync)
+    @app.get("/api/send/tools")
+    def send_tools() -> dict:
+        from ..extract.send import Tools
+        try:
+            return {"ok": True, "mode": Tools().mode}
+        except Exception as exc:
+            return {"ok": False, "error": str(exc)}
+
+    @app.post("/api/send")
+    def send_files(req: dict) -> dict:
+        import shlex
+
+        if not source:
+            raise HTTPException(400, "start the web UI with --source to enable sending")
+        if not req.get("dest") or not req.get("fs_id"):
+            raise HTTPException(400, "destination and filesystem are required")
+        jid = uuid.uuid4().hex[:8]
+        job = {"id": jid, "kind": "send", "request": req, "state": "queued", "started": time.time(),
+               "message": "", "log": [], "outputs": []}
+
+        def progress(msg: str) -> None:
+            job["log"] = (job["log"] + [msg])[-40:]
+            job["message"] = msg
+
+        def run() -> None:
+            from ..extract.send import SendOptions, send
+            from ..io.source import RawSource
+            from ..zfs.pool import open_pools
+            job["state"] = "running"
+            try:
+                d = MapDB(map_path, readonly=True)
+                src = RawSource(source)
+                pool = open_pools(src)[0]
+                opts = SendOptions(
+                    dest=req["dest"], staging=Path(req.get("staging") or Path(map_path).resolve().parent / "staging"),
+                    ssh_args=shlex.split(req.get("ssh") or ""), overwrite=bool(req.get("overwrite")),
+                    include_partial=bool(req.get("include_partial")), dry_run=bool(req.get("dry_run")),
+                    sudo=bool(req.get("sudo")))
+                res = send(d, pool, int(req["fs_id"]), req.get("paths") or None, opts, progress=progress)
+                verb = "would send" if res.dry_run else "sent"
+                job["message"] = (f"{verb} {res.sent} files; metadata restored on {res.restored}; held back "
+                                  f"{res.held_back_partial} partial, {res.unrecoverable} unrecoverable")
+                job["result"] = res.__dict__
+                job["state"] = "failed" if res.errors else "done"
+                if res.errors:
+                    job["message"] += " | " + " | ".join(res.errors[:3])
+            except Exception as exc:
+                job["state"] = "failed"
+                job["message"] = str(exc)
+                log.error("send job %s failed: %s", jid, traceback.format_exc())
             job["finished"] = time.time()
 
         t = threading.Thread(target=run, daemon=True)

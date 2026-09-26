@@ -73,6 +73,10 @@ zesus extract case.sqlite /dev/sdb -o out/ --volume 1              # whole zvol 
 zesus extract case.sqlite /dev/sdb -o out/ --partition 1:1         # one partition of it
 zesus extract case.sqlite /dev/sdb -o out/ --fs 1 --path '/home/*' # selected files
 
+# 3b. Or send recovered files straight back where they belong (rsync; restores names,
+#     permissions, times and, with --sudo, owners)
+zesus send case.sqlite /dev/sdb --fs 1 --path /home --to root@server:/ --sudo --dry-run
+
 # 4. Write a recovery report: what was found, what is lost and why (Markdown + per-file CSV)
 zesus report case.sqlite -o case-report.md
 

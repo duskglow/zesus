@@ -38,7 +38,8 @@ src/zesus/
   volume/      LogicalVolume (gap-aware device over a reconstructed zvol) · Coverage
   partitions/  GPT, MBR plugins
   fs/          plugin API (api.py), registry, ext4 plugin (+ virtual JBD2 replay), identifiers
-  extract/     extraction engine, sparse output
+  extract/     extraction engine (+ LocalNamer: collision-safe local names), sparse output,
+               send.py (stage → rsync → generated POSIX restore script)
   scan/        pipeline (phase runner, resumable, downstream invalidation) · phases
   map/         schema.sql, db.py (WAL, in-place migrations), codes.py (block statuses)
   cli/         main (scan/info/report/web), extract_cmd (extract/ls), report, fullreport

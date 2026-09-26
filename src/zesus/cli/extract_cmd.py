@@ -47,6 +47,29 @@ def add_extract_parser(sub) -> None:
     e.add_argument("--no-sparse", action="store_true", help="do not create sparse output files")
     e.set_defaults(func=cmd_extract)
 
+    sd = sub.add_parser("send", help="send recovered files back where they belong (rsync + original metadata)",
+                        description="Stage recovered files locally, rsync them to DEST (user@host:/path or a "
+                                    "local directory), then restore original names, symlinks, modes, times and "
+                                    "(with --sudo) owners on the destination. Existing files are never "
+                                    "overwritten unless --overwrite; partially recovered files are held back "
+                                    "unless --include-partial.")
+    sd.add_argument("map")
+    sd.add_argument("source", help="the same image/device the map was built from")
+    sd.add_argument("--fs", type=int, required=True, metavar="FSID", help="filesystem id (see extract --list)")
+    sd.add_argument("--path", action="append", default=[], metavar="GLOB",
+                    help="only these paths (glob or directory prefix); default: everything")
+    sd.add_argument("--to", required=True, metavar="DEST", help="user@host:/path, or a local directory")
+    sd.add_argument("--staging", help="local staging directory (default: <map dir>/staging)")
+    sd.add_argument("--ssh", default="", help='extra ssh options, e.g. "-p 2222 -i ~/.ssh/id_ed25519"')
+    sd.add_argument("--sudo", action="store_true",
+                    help="run rsync and the restore script as root on the destination (sudo -n); restores owners")
+    sd.add_argument("--overwrite", action="store_true", help="replace files that already exist at the destination")
+    sd.add_argument("--include-partial", action="store_true",
+                    help="also send partially recovered files (their gaps are zero-filled)")
+    sd.add_argument("--no-metadata", action="store_true", help="skip restoring names/modes/owners/times")
+    sd.add_argument("-n", "--dry-run", action="store_true", help="show what would be sent; change nothing")
+    sd.set_defaults(func=cmd_send)
+
     ls = sub.add_parser("ls", help="browse the file inventory in a map")
     ls.add_argument("map")
     ls.add_argument("path", nargs="?", default="/")
@@ -161,6 +184,32 @@ def cmd_extract(args: argparse.Namespace) -> int:
              time.monotonic() - t0, len(ex.records), full, part, none, man)
     src.verify_unchanged()
     return 0 if not (part or none) else 2
+
+
+def cmd_send(args: argparse.Namespace) -> int:
+    import shlex
+
+    from ..extract.send import SendOptions, send
+    from ..io.source import RawSource
+    from ..map.db import MapDB
+    from ..zfs.pool import open_pools
+
+    logsetup.setup(args.verbose, args.log)
+    db = MapDB(args.map, readonly=True)
+    src = RawSource(args.source)
+    pool = open_pools(src)[0]
+    staging = Path(args.staging) if args.staging else Path(args.map).resolve().parent / "staging"
+    opts = SendOptions(dest=args.to, staging=staging, ssh_args=shlex.split(args.ssh), overwrite=args.overwrite,
+                       include_partial=args.include_partial, dry_run=args.dry_run, sudo=args.sudo,
+                       metadata=not args.no_metadata)
+    res = send(db, pool, args.fs, args.path or None, opts)
+    log.info("%s: staged %d, sent %d, restored metadata on %d; held back %d partial, %d unrecoverable%s",
+             "DRY RUN" if res.dry_run else "done", res.staged, res.sent, res.restored, res.held_back_partial,
+             res.unrecoverable, f"; restore script: {res.script}" if res.script else "")
+    for e in res.errors:
+        log.error("%s", e)
+    src.verify_unchanged()
+    return 1 if res.errors else 0
 
 
 def cmd_ls(args: argparse.Namespace) -> int:

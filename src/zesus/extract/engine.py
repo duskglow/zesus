@@ -50,6 +50,7 @@ class Options:
     partial_suffix: str | None = None   # e.g. ".PARTIAL"
     sparse: bool = True
     hash_outputs: bool = True
+    skip_existing: bool = False        # resume: keep files already written with the right size
 
 
 @dataclass
@@ -80,6 +81,8 @@ class Extractor:
         self.db, self.pool, self.opts = db, pool, opts
         self.records: list[OutputRecord] = []
         self._fs_handles: dict = {}
+        self.local_rel: dict[str, Path] = {}          # filesystem path -> path relative to the fs root
+        self.last_selection: list = []
         out = Path(opts.out_dir)
         guard.assert_not_protected([out])
         out.mkdir(parents=True, exist_ok=True)
@@ -276,25 +279,19 @@ class Extractor:
             src_reader = self._zpl(fs)
         else:
             src_reader = LogicalVolume(self.pool, self.db, fs["volume_id"])
-        root = self.out / f"fs{fs_id}-{fs['fstype']}{'-' + safe_name(fs['label']) if fs['label'] else ''}"
-        rows = self.db.execute("SELECT * FROM fs_entries WHERE fs_id=? ORDER BY path", (fs_id,)).fetchall()
-        sel = []
-        for r in rows:
-            if not include_deleted and r["deleted"]:
-                continue
-            if statuses and r["status"] not in statuses and r["type"] in ("file", "symlink"):
-                continue
-            if patterns and not any(fnmatch.fnmatchcase(r["path"], p) or r["path"].startswith(p.rstrip("/") + "/")
-                                    or r["path"] == p for p in patterns):
-                continue
-            sel.append(r)
+        root = self.fs_root(fs)
+        sel = self.select(fs_id, patterns, statuses, include_deleted)
+        self.last_selection = sel
+        namer = LocalNamer()
+        for r in sel:                                  # path order: deterministic local names
+            self.local_rel[r["path"]] = namer.local(r["path"])
         log.info("extracting %d entries from filesystem %d into %s", len(sel), fs_id, root)
         # order files by their first data extent to reduce seeking
         firsts = {r["id"]: (self.db.execute("SELECT min(volume_offset) FROM fs_extents WHERE entry_id=?",
                                             (r["id"],)).fetchone()[0] or 0) for r in sel if r["type"] == "file"}
         dirs_meta = []
         for r in sorted(sel, key=lambda r: (r["type"] != "dir", firsts.get(r["id"], 0))):
-            target = root / to_local_path(r["path"])
+            target = root / self.local_rel[r["path"]]
             try:
                 if r["type"] == "dir":
                     target.mkdir(parents=True, exist_ok=True)
@@ -313,7 +310,34 @@ class Extractor:
         for target, r in reversed(dirs_meta):
             _set_times(target, r)
 
+    def select(self, fs_id: int, patterns: list[str] | None = None, statuses: set[str] | None = None,
+               include_deleted: bool = True) -> list:
+        """Entries matching glob/prefix *patterns* and (for files and symlinks) *statuses*."""
+        sel = []
+        for r in self.db.execute("SELECT * FROM fs_entries WHERE fs_id=? ORDER BY path", (fs_id,)):
+            if not include_deleted and r["deleted"]:
+                continue
+            if statuses and r["status"] not in statuses and r["type"] in ("file", "symlink"):
+                continue
+            if patterns and not any(fnmatch.fnmatchcase(r["path"], p) or r["path"].startswith(p.rstrip("/") + "/")
+                                    or r["path"] == p for p in patterns):
+                continue
+            sel.append(r)
+        return sel
+
+    def fs_root(self, fs) -> Path:
+        return self.out / f"fs{fs['id']}-{fs['fstype']}{'-' + safe_name(fs['label']) if fs['label'] else ''}"
+
+    def _already_there(self, r, target: Path) -> bool:
+        if self.opts.skip_existing and target.is_file() and target.stat().st_size == (r["size"] or 0):
+            self.records.append(OutputRecord(kind="file", path=str(target), source=r["path"], size=r["size"] or 0,
+                                             status=r["status"] or "full", extra={"skipped_existing": True}))
+            return True
+        return False
+
     def _extract_file(self, lv: LogicalVolume, r, target: Path) -> None:
+        if self._already_there(r, target):
+            return
         size = r["size"] or 0
         rec = OutputRecord(kind="file", path=str(target), source=r["path"], size=size, status="full",
                            extra={"inode": r["inode"], "mode": r["mode"], "uid": r["uid"], "gid": r["gid"],
@@ -370,6 +394,8 @@ class Extractor:
         return ZplFilesystem(Objset(self.pool.reader, blkptr.parse(ds["objset_bp"]), ds["name"]), ds["name"])
 
     def _extract_zpl_file(self, zfs, r, target: Path) -> None:
+        if self._already_there(r, target):
+            return
         size = r["size"] or 0
         rec = OutputRecord(kind="file", path=str(target), source=r["path"], size=size, status="full",
                            extra={"object": r["inode"], "mode": r["mode"], "uid": r["uid"], "gid": r["gid"],
@@ -448,6 +474,37 @@ def safe_name(name: str) -> str:
         if name.split(".")[0].upper() in _WIN_RESERVED or name.endswith((" ", ".")):
             name = name + "%"
     return name.replace("/", "%2F") or "%"
+
+
+class LocalNamer:
+    """Map filesystem paths to local paths that are safe *and unique* on the output
+    filesystem. Names are escaped with safe_name(). On case-insensitive platforms
+    (Windows, macOS), names that differ only in case get a '%~N' suffix instead of
+    silently overwriting each other."""
+
+    def __init__(self, case_insensitive: bool | None = None) -> None:
+        self.ci = sys.platform in ("win32", "darwin") if case_insensitive is None else case_insensitive
+        self._map: dict[str, Path] = {"/": Path(".")}
+        self._taken: dict[tuple[str, str], str] = {}
+
+    def local(self, fs_path: str) -> Path:
+        fs_path = "/" + fs_path.strip("/") if fs_path.strip("/") else "/"
+        if fs_path in self._map:
+            return self._map[fs_path]
+        parent, _, name = fs_path.rpartition("/")
+        lp = self.local(parent or "/")
+        cand = safe_name(name) if name not in (".", "..") else "%" + name
+        n = 1
+        while True:
+            key = (str(lp), cand.casefold() if self.ci else cand)
+            owner = self._taken.get(key)
+            if owner is None or owner == fs_path:
+                break
+            n += 1
+            cand = f"{safe_name(name)}%~{n}"
+        self._taken[key] = fs_path
+        self._map[fs_path] = lp / cand
+        return self._map[fs_path]
 
 
 def to_local_path(fs_path: str) -> Path:
