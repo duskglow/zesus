@@ -66,11 +66,12 @@ Look for your volume in the output. The line under it says how much is recoverab
 
 ```
 Volume tank/vm-100-disk-0: volsize=880.0 GiB volblocksize=16384 status=verified
-  blocks: 57671680  verified=48198765 (83.57%)  older-generation=19552  never-written=9440517 (16.37%)  lost=1024 (0.00%)
+  blocks: 57671680  verified=48229181 (83.63%)  older-generation=22  never-written=9440517 (16.37%)  lost=1960 (0.00%)
 ```
 
 "never-written" is empty space in the volume, so nothing is lost there. What matters is
-`lost`.
+`lost`. (That example is a real 880 GiB VM disk, recovered after it had fallen off the uberblock
+ring. It lost 31 MiB, almost all of it in re-downloadable caches.)
 
 ```bash
 # 3. Get the whole disk back as an image file.
