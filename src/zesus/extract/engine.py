@@ -34,7 +34,7 @@ from ..zfs import compress
 from ..zfs.checksum import compute
 from ..zfs.constants import ChecksumType
 from ..zfs.pool import Pool
-from .sparse import make_sparse
+from .sparse import make_sparse, set_size
 
 log = logging.getLogger(__name__)
 
@@ -100,7 +100,7 @@ class Extractor:
         f = open(path, "wb")
         if self.opts.sparse:
             make_sparse(f)
-        f.truncate(size)
+        set_size(f, size)            # never f.truncate(): on Windows that writes zeros
         return f
 
     def _fill(self, f, offset: int, length: int) -> None:
@@ -309,7 +309,7 @@ class Extractor:
     def _finish(self, rec: OutputRecord, path: Path, image: bool) -> None:
         lost = rec.lost_bytes
         rec.status = "full" if lost == 0 else ("none" if lost >= rec.size and rec.size else "partial")
-        if self.opts.hash_outputs:
+        if self.opts.hash_outputs and not rec.extra.get("cancelled"):
             h = hashlib.sha256()
             with open(path, "rb") as f:
                 while True:
@@ -385,17 +385,7 @@ class Extractor:
     def select(self, fs_id: int, patterns: list[str] | None = None, statuses: set[str] | None = None,
                include_deleted: bool = True) -> list:
         """Entries matching glob/prefix *patterns* and (for files and symlinks) *statuses*."""
-        sel = []
-        for r in self.db.execute("SELECT * FROM fs_entries WHERE fs_id=? ORDER BY path", (fs_id,)):
-            if not include_deleted and r["deleted"]:
-                continue
-            if statuses and r["status"] not in statuses and r["type"] in ("file", "symlink"):
-                continue
-            if patterns and not any(fnmatch.fnmatchcase(r["path"], p) or r["path"].startswith(p.rstrip("/") + "/")
-                                    or r["path"] == p for p in patterns):
-                continue
-            sel.append(r)
-        return sel
+        return select_entries(self.db, fs_id, patterns, statuses, include_deleted)
 
     def fs_root(self, fs) -> Path:
         return self.out / f"fs{fs['id']}-{fs['fstype']}{'-' + safe_name(fs['label']) if fs['label'] else ''}"
@@ -521,6 +511,64 @@ class Extractor:
             head["cancelled"] = True
         path.write_text(json.dumps({**head, **(extra or {}), "outputs": outs}, indent=1), encoding="utf-8")
         return path
+
+
+def select_entries(db: MapDB, fs_id: int, patterns: list[str] | None = None, statuses: set[str] | None = None,
+                   include_deleted: bool = True) -> list:
+    """Entries of a filesystem matching glob/prefix *patterns* and (for files and symlinks)
+    *statuses*. A pattern selects an exact path, everything under a directory, or an
+    fnmatch glob. Needs only the map."""
+    sel = []
+    for r in db.execute("SELECT * FROM fs_entries WHERE fs_id=? ORDER BY path", (fs_id,)):
+        if not include_deleted and r["deleted"]:
+            continue
+        if statuses and r["status"] not in statuses and r["type"] in ("file", "symlink"):
+            continue
+        if patterns and not any(fnmatch.fnmatchcase(r["path"], p) or r["path"].startswith(p.rstrip("/") + "/")
+                                or r["path"] == p for p in patterns):
+            continue
+        sel.append(r)
+    return sel
+
+
+def estimate_files(db: MapDB, fs_id: int, patterns: list[str] | None = None, statuses: set[str] | None = None,
+                   include_deleted: bool = True) -> dict:
+    """What extracting this selection would write: counts, sizes, and bytes that cannot
+    be recovered (they become gaps)."""
+    sel = select_entries(db, fs_id, patterns, statuses, include_deleted)
+    files = [r for r in sel if r["type"] == "file"]
+    size = sum(r["size"] or 0 for r in files)
+    rec = sum((r["recoverable_bytes"] if r["recoverable_bytes"] is not None else (r["size"] or 0)) for r in files)
+    by = {}
+    for r in files:
+        b = by.setdefault(r["status"] or "unknown", {"files": 0, "bytes": 0})
+        b["files"] += 1
+        b["bytes"] += r["size"] or 0
+    return {"entries": len(sel), "files": len(files), "dirs": sum(1 for r in sel if r["type"] == "dir"),
+            "symlinks": sum(1 for r in sel if r["type"] == "symlink"), "bytes": size,
+            "recoverable_bytes": rec, "lost_bytes": max(0, size - rec), "by_status": by}
+
+
+def estimate_volume_range(db: MapDB, volume_id: int, start: int, length: int) -> dict:
+    """Output size, bytes to read, and bytes that will be gaps, from the coverage table."""
+    v = db.execute("SELECT * FROM volumes WHERE id=?", (volume_id,)).fetchone()
+    if v is None:
+        raise KeyError(volume_id)
+    bs = v["volblocksize"]
+    lo, hi = start // bs, -(-(start + length) // bs)
+    counts: dict[str, int] = {}
+    for r in db.execute("SELECT first_blkid, count, status FROM volume_coverage WHERE volume_id=? AND "
+                        "first_blkid < ? AND first_blkid + count > ?", (volume_id, hi, lo)):
+        n = min(hi, r["first_blkid"] + r["count"]) - max(lo, r["first_blkid"])
+        counts[r["status"]] = counts.get(r["status"], 0) + n
+    covered = sum(counts.values())
+    counts["no_metadata"] = counts.get("no_metadata", 0) + max(0, (hi - lo) - covered)
+    good = {"ok", "ok_stale", "embedded", "unknown"}
+    sparse = {"hole", "discarded"}
+    return {"bytes": length, "blocks": hi - lo, "block_size": bs, "by_status": counts,
+            "read_bytes": sum(n for s, n in counts.items() if s in good) * bs,
+            "sparse_bytes": sum(n for s, n in counts.items() if s in sparse) * bs,
+            "lost_bytes": sum(n for s, n in counts.items() if s not in good | sparse) * bs}
 
 
 def write_ddrescue_map(path: Path, size: int, gaps: Iterable[GapRecord]) -> None:

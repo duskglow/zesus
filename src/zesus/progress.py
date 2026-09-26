@@ -39,6 +39,7 @@ class Progress:
         self._listeners: list[tuple[Callable[[dict[str, Any]], None], float, list[float]]] = []
         self.started = time.time()
         self.state = "running"
+        self._final: dict[str, Any] | None = None
         self._reset("", 0, "bytes", "")
         self.publish_every = publish_every
 
@@ -52,6 +53,7 @@ class Progress:
     def begin(self, stage: str, total: float = 0, unit: str = "bytes", message: str = "") -> None:
         with self._lock:
             self._reset(stage, total, unit, message)
+            self.state, self._final = "running", None
         self._notify(force=True)
 
     def advance(self, n: float = 1, message: str | None = None) -> None:
@@ -78,7 +80,9 @@ class Progress:
         self._notify()
 
     def finish(self, state: str = "done", message: str | None = None) -> None:
+        final = self.snapshot()                  # freeze rate/elapsed at the end
         with self._lock:
+            self._final = final
             self.state = state
             self.stage = f"{self.name} {state}" if self.name else state
             if message is not None:
@@ -96,6 +100,9 @@ class Progress:
     # ------------------------------------------------------------------ reading
     def snapshot(self) -> dict[str, Any]:
         with self._lock:
+            if self._final is not None and self.state != "running":
+                return {**self._final, "state": self.state, "stage": self.stage, "message": self.message,
+                        "eta_s": None, "updated": time.time()}
             now = time.monotonic()
             t0, d0 = self._samples[0]
             dt = now - t0

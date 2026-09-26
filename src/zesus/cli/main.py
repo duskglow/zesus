@@ -185,7 +185,9 @@ def build_parser() -> argparse.ArgumentParser:
     rp.set_defaults(func=cmd_report)
     wb = sub.add_parser("web", help="browse a map in a local web UI (needs the [web] extra)")
     wb.add_argument("map")
-    wb.add_argument("--source", help="image/device, to enable extraction from the UI")
+    wb.add_argument("--source", action="append", default=[],
+                    help="image/device (repeat once per member disk) for scans and extraction from the UI; "
+                         "default: the files recorded in the map")
     wb.add_argument("--host", default="127.0.0.1")
     wb.add_argument("--port", type=int, default=8765)
     wb.set_defaults(func=cmd_web)
