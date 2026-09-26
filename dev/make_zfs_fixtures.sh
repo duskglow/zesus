@@ -31,25 +31,8 @@ command -v zpool >/dev/null || { echo "zpool not found: install zfsutils-linux" 
 [ "$(id -u)" = 0 ] || { echo "run as root (sudo)" >&2; exit 1; }
 mkdir -p "$OUT"
 
-gen() {  # gen SEED BYTES KIND -> stdout; KIND = random | text | mixed
-    python3 - "$1" "$2" "$3" <<'PY'
-import random, sys
-seed, n, kind = int(sys.argv[1]), int(sys.argv[2]), sys.argv[3]
-r = random.Random(seed)
-out = sys.stdout.buffer
-words = [bytes(r.choice(b"abcdefghijklmnopqrstuvwxyz") for _ in range(r.randint(2, 9))) for _ in range(500)]
-done = 0
-while done < n:
-    k = kind if kind != "mixed" else r.choice(["random", "text"])
-    m = min(n - done, 1 << 16)
-    if k == "random":
-        b = r.randbytes(m)
-    else:
-        b = b" ".join(r.choice(words) for _ in range(m // 4))[:m]
-        b = b + b"\n" * (m - len(b))
-    out.write(b)
-    done += m
-PY
+gen() {  # gen SEED BYTES KIND -> stdout; KIND = random | text | mixed (see dev/zfx_gen.py)
+    python3 "$HERE/dev/zfx_gen.py" "$1" "$2" "$3"
 }
 
 zvol_dev() {  # wait for the zvol device node
@@ -106,9 +89,9 @@ build() {  # build NAME ASHIFT VDEVSPEC NMEMBERS
     zpool sync "$pool"
 
     # manifest: before destroying, record what should be recoverable
-    python3 - "$dir" "$name" "$kind" "$ashift" "$n" "$pool" <<'PY' > "$dir/manifest.json"
+    python3 - "$dir" "$name" "$kind" "$ashift" "$n" "$pool" "$seed" <<'PY' > "$dir/manifest.json"
 import hashlib, json, os, subprocess, sys
-d, name, kind, ashift, n, pool = sys.argv[1:7]
+d, name, kind, ashift, n, pool, seed = sys.argv[1:8]
 def h(p):
     return hashlib.sha256(open(p, "rb").read()).hexdigest()
 files = {}
@@ -123,6 +106,8 @@ def prop(ds, k):
 guid = subprocess.run(["zpool", "get", "-Hp", "-o", "value", "guid", pool], capture_output=True, text=True).stdout.strip()
 print(json.dumps({
     "name": name, "layout": kind, "ashift": int(ashift), "members": int(n), "pool": pool, "pool_guid": guid,
+    "seed": int(seed),
+    "content": {"vol": [[0, 3145728, "random"], [1, 3145728, "text"]], "gone": [[300, 4194304, "mixed"]]},
     "zvols": {"vol": {"size": os.path.getsize(os.path.join(d, "vol.bin")), "sha256": h(os.path.join(d, "vol.bin")),
                       "volblocksize": 8192, "destroyed": False},
               "gone": {"size": os.path.getsize(os.path.join(d, "gone.bin")), "sha256": h(os.path.join(d, "gone.bin")),

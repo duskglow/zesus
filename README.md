@@ -80,7 +80,11 @@ zesus send case.sqlite /dev/sdb --fs 1 --path /home --to root@server:/ --sudo --
 # 4. Write a recovery report: what was found, what is lost and why (Markdown + per-file CSV)
 zesus report case.sqlite -o case-report.md
 
-# 5. Or browse in a local web UI
+# Multi-disk pools: give one image per member disk, in any order
+zesus members sda.img sdb.img sdc.img sdd.img       # which is which, what is missing, can it be read
+zesus scan sda.img sdb.img sdc.img sdd.img -o case.sqlite
+
+# 5. Or browse in a local web UI (scans, extraction, progress and cancel)
 zesus web case.sqlite --source /dev/sdb       # http://127.0.0.1:8765/
 ```
 
@@ -94,7 +98,7 @@ Keep the map and the outputs on a **different disk** from the evidence.
 
 | Area | Status |
 |---|---|
-| Vdevs | single disk / file, mirror. RAIDZ/dRAID: detected, reported as unsupported |
+| Vdevs | single disk / file, mirror, RAIDZ1/2/3 (one image per member disk; up to *nparity* members may be missing). dRAID and expanded RAIDZ: detected, reported as unsupported |
 | Features | lz4, gzip, zle, lzjb, zstd; fletcher2/4, sha256, sha512, blake3; embedded data; gang blocks; large dnodes; hole_birth |
 | Encryption | detected and reported; decryption not implemented |
 | Partition tables | GPT (with backup-header fallback), MBR with logical partitions |

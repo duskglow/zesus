@@ -200,6 +200,73 @@ Reasons you may see:
 
 ---
 
+## Recipe 4b: "My pool had several disks" (mirror or RAIDZ)
+
+Image every member disk, one image file per disk. Then give Zesus all of them, in any
+order:
+
+```bash
+# Which image is which disk, and can the pool still be read?
+zesus members sda.img sdb.img sdc.img sdd.img
+```
+
+```
+pool tank (guid 1133...), newest txg 150122
+  vdev 0: raidz1 width 4, ashift 12: DEGRADED but recoverable: 1 of 4 members missing, rebuilt from parity (no redundancy left)
+    child  0  present   sda.img   ...
+    child  0  duplicate sdd.img   ...  (same member as sda.img: identical at 12 sampled regions)
+    child  1  missing   -         ...
+    child  2  present   sdc.img   ...
+    child  3  present   sdb.img   ...
+```
+
+Zesus matches each image to its place in the vdev using the label on the image itself, so
+file names and order do not matter. It tells you:
+
+* when a disk is missing;
+* when two images are the same disk (as above: imaged twice);
+* when a member is **stale**: it dropped out of the pool earlier, so its newest blocks are
+  older than the others'.
+
+With RAIDZ*n*, up to *n* members can be missing. Their data is rebuilt from parity. A mirror
+needs just one copy.
+
+Then scan and extract as in Recipe 1, naming every image:
+
+```bash
+zesus scan sda.img sdb.img sdc.img -o case.sqlite
+zesus extract case.sqlite -o /mnt/other/recovered --volume tank/vm-100-disk-0
+```
+
+`extract`, `send` and `web` reuse the member images recorded in the map when you do not
+name them. They check that each file still has the size the scan saw.
+
+Every block rebuilt from parity is accepted **only if it matches its block pointer's
+checksum**, exactly like a direct read. If a disk is missing and a block cannot be
+rebuilt, you get a reported gap, never guessed data. If all disks are present but one
+column is silently damaged, Zesus finds which column is wrong the way ZFS does, by trying
+each and keeping the one whose checksum matches.
+
+About strategies:
+
+* RAIDZ is always read **in place**, from the member images. There is no meaningful
+  "combined" image of a RAIDZ vdev: each block is laid out across the disks in its own
+  way, so a missing disk can only be rebuilt one known block at a time.
+* A mirror needs nothing special. Zesus reads whichever copy verifies, trying the copy
+  with the fewest checksum failures first.
+
+Imaged the missing disk later? Run `zesus members` on the full set, then scan again with
+every image. Carving adds what the new disk shows; blocks already found are not
+duplicated.
+
+Speed: members are read in parallel, one sequential stream per disk, so a 4-disk RAIDZ
+scans in about the time of one disk when the storage can deliver it. The defaults are
+safe for spinning disks and network shares. `--workers N` sets how many CPU threads (and
+carving processes) to use. `--io-depth` raises the number of reads in flight, which only
+helps on SSD/NVMe.
+
+---
+
 ## Recipe 5: "I want to check first, cheaply"
 
 Most of the value comes from the fast phases. To see what existed and what was destroyed,
@@ -229,6 +296,12 @@ On Linux, `sudo blockdev --setro /dev/sdb` is a good extra safety step.
 ## Tips
 
 * **Interrupted?** Re-run the exact same `scan` command. Finished work is not repeated.
+  In the web UI (`zesus web case.sqlite`), every scan, extraction and send shows a progress
+  bar with rate and time remaining, and has a Cancel button.
+* **Many files?** In the web UI, tick files and folders (a folder includes everything under
+  it), then "Extract…". Before anything is written, it shows the total size, what cannot
+  be recovered, the free space on the output drive and, once a job has measured the
+  throughput, an estimated time.
 * **Disk space for outputs:** volume images are sparse (unwritten parts take no space), but
   budget for the used size of the volume.
 * **Speed:** the scan reads the whole disk once to carve metadata and once to verify data. A

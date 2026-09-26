@@ -47,6 +47,13 @@ def add_scan_args(p: argparse.ArgumentParser) -> None:
                    help="(validation) reconstruct volumes from carved blocks only, as if every "
                         "uberblock had lost track of them")
     p.add_argument("--progress-interval", type=float, default=30, help="seconds between progress lines")
+    p.add_argument("--strategy", choices=["inplace", "combined"], default="inplace",
+                   help="inplace (default): read the member images directly. combined (mirrors only): first "
+                        "build one vdev image from the healthiest member per region, then scan that")
+    p.add_argument("--combined-image", help="with --strategy combined: where to write the combined image "
+                                            "(default: next to the map). Reused if it already exists")
+    p.add_argument("--mapfile", action="append", default=[], metavar="IMAGE=MAPFILE",
+                   help="ddrescue mapfile of a member image: its unrescued ranges are taken from other members")
     add_parallel_args(p)
 
 
@@ -75,6 +82,8 @@ def cmd_scan(args: argparse.Namespace) -> int:
     mappath = Path(args.map)
     logsetup.setup(args.verbose, args.log or mappath.with_suffix(".log.jsonl"))
     log.info("zesus %s: scan %s -> %s", __version__, " ".join(args.source), mappath)
+    if args.strategy == "combined":
+        args.source = [str(_combined_image(args, mappath))]
     src = SourceSet.open(args.source)
     apply_parallel_args(args, [m.name for m in src])
     db = MapDB(mappath)
@@ -104,6 +113,44 @@ def cmd_scan(args: argparse.Namespace) -> int:
         src.close()
     log.info("scan finished; map at %s", mappath)
     return 0
+
+
+def _mapfiles(specs: list[str]) -> dict[str, str]:
+    out = {}
+    for spec in specs:
+        img, sep, mp = spec.rpartition("=")
+        if not sep:
+            raise SystemExit(f"--mapfile wants IMAGE=MAPFILE, got {spec!r}")
+        out[img] = mp
+    return out
+
+
+def _combined_image(args: argparse.Namespace, mappath: Path) -> Path:
+    from ..combine import CannotCombine, combine
+    out = Path(args.combined_image) if args.combined_image else mappath.with_suffix(".combined.img")
+    if out.exists() and Path(str(out) + ".provenance.json").exists():
+        log.info("reusing combined image %s", out)
+        return out
+    try:
+        combine(args.source, out, _mapfiles(args.mapfile))
+    except CannotCombine as exc:
+        raise SystemExit(str(exc)) from exc
+    return out
+
+
+def cmd_combine(args: argparse.Namespace) -> int:
+    from ..combine import CannotCombine, combine
+    from ..progress import Progress, cli_logger
+    logsetup.setup(args.verbose)
+    prog = Progress("combine")
+    prog.listen(cli_logger(log), 30)
+    try:
+        res = combine(args.sources, args.out, _mapfiles(args.mapfile), progress=prog)
+    except CannotCombine as exc:
+        raise SystemExit(str(exc)) from exc
+    print(f"{res.path}: {res.size} bytes; regions per member {res.regions_from}; "
+          f"{len(res.missing)} region(s) on no member (see {res.path}.mapfile)")
+    return 0 if not res.missing else 2
 
 
 def cmd_members(args: argparse.Namespace) -> int:
@@ -173,6 +220,12 @@ def build_parser() -> argparse.ArgumentParser:
     m.add_argument("sources", nargs="+", help="disk images or devices, one per vdev member (read-only)")
     m.add_argument("--json", action="store_true")
     m.set_defaults(func=cmd_members)
+    cb = sub.add_parser("combine", help="build one vdev image from the members of a mirror (not RAIDZ)")
+    cb.add_argument("sources", nargs="+", help="member images (read-only)")
+    cb.add_argument("-o", "--out", required=True, help="combined image to write (not on the evidence)")
+    cb.add_argument("--mapfile", action="append", default=[], metavar="IMAGE=MAPFILE",
+                    help="ddrescue mapfile of a member image: its unrescued ranges are taken from other members")
+    cb.set_defaults(func=cmd_combine)
     i = sub.add_parser("info", help="summarize a map")
     i.add_argument("map")
     i.set_defaults(func=cmd_info)

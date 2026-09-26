@@ -30,10 +30,11 @@ datasets, even after they have left the uberblock ring.
 
 ```
 src/zesus/
-  io/          read-only sources + write guard
+  io/          read-only sources (SourceSet: one per member disk) + write guard
   zfs/         on-disk format: label/uberblock, nvlist (XDR + native), blkptr, checksum,
-               compress, dnode, objset, zap, dsl, history, zpl (ZFS filesystems), pool, reader
-  carve/       scanner (resumable raw carving) · classify · reconstruct (multi-generation
+               compress, dnode, objset, zap, dsl, history, zpl (ZFS filesystems), pool, reader,
+               vdev (disk/mirror/raidz candidate reads), raidz (column map), gf256 (parity), members
+  carve/       scanner (resumable raw carving) · raidz_carve (member rows) · classify · reconstruct (multi-generation
                tree merge + orphan placement + root clustering) · verify · fastsum (numba)
   volume/      LogicalVolume (gap-aware device over a reconstructed zvol) · Coverage
   partitions/  GPT, MBR plugins
@@ -43,7 +44,8 @@ src/zesus/
   scan/        pipeline (phase runner, resumable, downstream invalidation) · phases
   map/         schema.sql, db.py (WAL, in-place migrations), codes.py (block statuses)
   cli/         main (scan/info/report/web), extract_cmd (extract/ls), report, fullreport
-  web/         FastAPI + single-file vanilla JS UI (localhost only)
+  web/         FastAPI + single-file vanilla JS UI (localhost only): jobs with progress/cancel
+  parallel.py  ordered pipelines, read-ahead, --workers/--io-depth · progress.py · combine.py (mirrors)
 dev/           imgtool.py (inspect an image), make_ext4_fixtures.sh
 tests/         unit (fixtures in tests/fixtures), integration (needs ZESUS_TEST_IMAGE)
 docs/          how-to-use.md (user recipes), architecture.md, map-format.md, writing-plugins.md
@@ -78,7 +80,13 @@ For fast iteration on a big image, use a small slice:
 * **Big volumes:** keep per-block work in numpy. A zvol can have 50M+ blocks, so avoid
   Python dicts or loops per block (see `Summary`, `ChildIndex`, and the coverage-driven gap
   loop in the extractor).
-* **Spinning disks:** always read in physical order (`read_many`, `windows()`).
+* **Spinning disks:** always read in physical order (`read_many`, `windows()`). Parallel
+  work goes through `parallel.ordered_map`/`prefetch`: one sequential reader per source
+  (`--io-depth`), CPU on workers, results applied in order (maps must equal a serial run).
+* **RAIDZ:** never read DVA space linearly. Go through `TopVdev.candidates()` /
+  `read_window()`; a rebuilt block counts only if its checksum matches.
+* **Windows outputs:** create/extend files with `extract.sparse.set_size`, never
+  `truncate()` (the CRT writes zeros). Write text with `newline="\n"` (repo is LF).
 * **Carved roots:** associate them with a dataset by *shared tree blocks* (`cluster()`),
   never by size or geometry alone.
 * **Windows:** pass `encoding="utf-8"` to every `read_text`/`write_text`, since the default
@@ -97,13 +105,24 @@ Validated end to end on a real 1 TB single-disk pool:
 * Carved-only and ring+carved reconstructions matched slot for slot.
 * Extracted files passed independent integrity checks.
 
+Multi-disk (v2), validated so far:
+* RAIDZ math: an independent reference, every erasure pattern (p = 1..3), and synthetic
+  member disks (`tests/unit/test_raidz_*.py`).
+* A real 4-wide RAIDZ1 with one member missing (kotori): the history and datasets phases
+  found the destroyed zvol. 51k data blocks verified, 72% of them rebuilt from parity.
+  900 MiB extracted, with its GPT CRCs intact.
+* Single-disk maps and extractions are byte-identical to v1.
+* Not yet: real OpenZFS RAIDZ2/3 and mirror pools. `tests/unit/test_zfs_fixtures.py`
+  skips until `dev/make_zfs_fixtures.sh` has been run (needs ZFS; in WSL, run
+  `sudo apt install zfs-dkms zfsutils-linux`).
+
 Open items, roughly by value:
 1. Carved-only reconstruction for destroyed ZFS **filesystem** datasets (the volume path in
    `phase_reconstruct` shows the approach: cluster carved `os_type=2` objsets and walk
    them with `ZplFilesystem`).
-2. Test fixtures made by real OpenZFS (small file-backed pools with destroyed zvols and
-   datasets) for CI. These need a machine with ZFS. Add a `dev/make_zfs_fixtures.sh`.
-3. RAIDZ/dRAID reconstruction in `zfs/vdev.py` (they are currently reported as unsupported).
+2. Run `dev/make_zfs_fixtures.sh` (real OpenZFS mirror/RAIDZ1-3 pools) and commit the
+   fixtures, so RAIDZ2/3 are validated against OpenZFS in CI.
+3. dRAID and expanded RAIDZ (reported as unsupported). RAIDZ1/2/3 work: see below.
 4. More filesystem plugins: XFS and NTFS inventory (identification exists already).
 5. Verification of zvol **snapshots** as their own volumes.
 6. Encrypted datasets (with a user-supplied key).
