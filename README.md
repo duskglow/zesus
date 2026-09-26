@@ -103,6 +103,7 @@ New filesystems are plugins and need no change to core code. See
 
 ## Documentation
 
+* [docs/how-to-use.md](docs/how-to-use.md): **start here if you just want your data back**
 * [docs/architecture.md](docs/architecture.md): phases, reconstruction algorithm, block statuses
 * [docs/map-format.md](docs/map-format.md): the SQLite map and useful queries
 * [docs/writing-plugins.md](docs/writing-plugins.md): adding filesystem support
