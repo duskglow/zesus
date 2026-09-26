@@ -128,6 +128,18 @@ So the work is split into stages:
 * Results are applied **in order**. Checkpoints, map rows and output files are therefore
   exactly what a serial run produces, which the determinism tests check.
 
+Measured on the 1 TB single-disk validation run:
+
+| Phase | Time |
+|---|---|
+| carve | 103 min, disk-bound |
+| verify | 86 min |
+| reconstruct | 20 min |
+| contents (ext4 inventory of the 880 GiB volume) | 26 s |
+
+The ext4 inventory is therefore left serial. The next candidate is `reconstruct`: its
+reads of carved candidate blocks are small and scattered.
+
 ## Why the map stores L1 pointers instead of every L0
 
 An 880 GiB zvol with 16 KiB blocks has 57 million logical blocks. The map stores, per
