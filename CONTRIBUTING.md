@@ -14,6 +14,11 @@ ruff check src tests
 
 Integration tests run against a real ZFS image when `ZESUS_TEST_IMAGE` is set.
 
+## Conduct
+
+Be professional, keep discussions technical, and keep politics out of the project entirely.
+See [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md).
+
 ## Using AI tools
 
 AI-assisted contributions are welcome. You remain responsible for everything you submit:
