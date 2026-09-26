@@ -25,14 +25,14 @@ from pathlib import Path
 import numpy as np
 
 from ..carve.fastsum import fletcher4_many
-from ..carve.verify import chosen_blocks, load_spans, windows
+from ..carve.verify import add_extents, chosen_blocks, load_spans, windows
 from ..io import guard
 from ..map.codes import DESCRIPTIONS, RECOVERED, BlockStatus
 from ..map.db import MapDB, now
 from ..volume.logical import LogicalVolume
 from ..zfs import compress
 from ..zfs.checksum import compute
-from ..zfs.constants import VDEV_LABEL_START_SIZE, ChecksumType
+from ..zfs.constants import ChecksumType
 from ..zfs.pool import Pool
 from .sparse import make_sparse
 
@@ -127,31 +127,33 @@ class Extractor:
         path = self.out / out_name
         rec = OutputRecord(kind=kind, path=str(path), source=source_desc, size=length, status="full")
         spans = load_spans(self.db, volume_id)
-        wl = chosen_blocks(self.pool, spans, {BlockStatus.OK, BlockStatus.OK_STALE, BlockStatus.UNKNOWN},
-                           blk_range=(lo, hi), label="extract")
+        wl = add_extents(self.pool, chosen_blocks(
+            self.pool, spans, {BlockStatus.OK, BlockStatus.OK_STALE, BlockStatus.UNKNOWN},
+            blk_range=(lo, hi), label="extract"))
         n = len(wl["blkid"])
         written = np.zeros(hi - lo, dtype=bool)
         t0 = last_log = time.monotonic()
         total = float(wl["psize"].sum()) if n else 0.0
         done = 0
-        vsrc = self.pool.vdev_images[0].source
         lv = LogicalVolume(self.pool, self.db, volume_id)
         log.info("extracting %s → %s: %d data blocks (%.1f GiB on disk)", source_desc, path, n, total / (1 << 30))
         with self._open_out(path, length) as f:
             for sl, vdev, w0, w1 in windows(wl):
-                buf = vsrc.pread(VDEV_LABEL_START_SIZE + w0, w1 - w0) if vdev == 0 else b""
-                offs = wl["offset"][sl].astype(np.int64) - w0
                 psz = wl["psize"][sl]
+                top = self.pool.vdevs.top.get(vdev)
+                buf, offs, avail = b"", np.zeros(len(psz), np.int64), np.zeros(len(psz), bool)
+                if top is not None and not top.unsupported:
+                    buf, offs, avail = top.read_window(w0, w1).gather(wl["offset"][sl], psz)
                 ctype = wl["ctype"][sl]
                 ok = np.zeros(len(offs), dtype=bool)
-                f4 = (ctype == ChecksumType.FLETCHER_4) & ~wl["gang"][sl] & (offs + psz <= len(buf))
+                f4 = (ctype == ChecksumType.FLETCHER_4) & ~wl["gang"][sl] & avail
                 if f4.any():
                     ok[f4] = (fletcher4_many(buf, offs[f4], psz[f4]) == wl["cksum"][sl][f4]).all(axis=1)
                 for k in range(len(offs)):
                     idx = sl.start + k
                     blkid = int(wl["blkid"][idx])
                     o, p = int(offs[k]), int(psz[k])
-                    raw = buf[o:o + p] if o + p <= len(buf) else None
+                    raw = buf[o:o + p] if avail[k] else None
                     good = bool(ok[k])
                     if not f4[k] and raw is not None and not wl["gang"][idx]:
                         try:
@@ -181,7 +183,7 @@ class Extractor:
                         continue
                     self._write_block(f, blkid, bs, data, start, end)
                     written[blkid - lo] = True
-                done += w1 - w0
+                done += int(psz.sum())
                 if time.monotonic() - last_log > 30:
                     last_log = time.monotonic()
                     log.info("  %.1f%% (%.0f MB/s)", 100 * done / max(1, total), done / (last_log - t0) / 1e6)

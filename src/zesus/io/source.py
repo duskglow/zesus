@@ -81,6 +81,10 @@ class RawSource(ReadOnlySource):
         guard.protect(self._path)
         self._fd = os.open(self._path, os.O_RDONLY | _O_BINARY | _O_NOINHERIT)
         self._lock = threading.Lock()
+        # Windows has no os.pread. Concurrent readers each check out their own read-only
+        # descriptor, so they do not serialize on one file position.
+        self._free_fds: list[int] = [self._fd]
+        self._all_fds: list[int] = [self._fd]
         st = os.fstat(self._fd)
         self._is_device = _is_device_path(self._path) or stat.S_ISBLK(st.st_mode) or stat.S_ISCHR(st.st_mode)
         self._size = _device_size(self._fd, self._path) if self._is_device else st.st_size
@@ -130,16 +134,31 @@ class RawSource(ReadOnlySource):
                 offset += len(b)
                 length -= len(b)
             return b"".join(chunks)
-        with self._lock:  # Windows: no pread, serialize seek+read
-            os.lseek(self._fd, offset, os.SEEK_SET)
+        fd = self._checkout()
+        try:
+            os.lseek(fd, offset, os.SEEK_SET)
             chunks = []
             while length > 0:
-                b = os.read(self._fd, length)
+                b = os.read(fd, length)
                 if not b:
                     break
                 chunks.append(b)
                 length -= len(b)
             return b"".join(chunks)
+        finally:
+            with self._lock:
+                self._free_fds.append(fd)
+
+    def _checkout(self) -> int:
+        with self._lock:
+            if self._fd < 0:
+                raise ValueError(f"{self._path}: source is closed")
+            if self._free_fds:
+                return self._free_fds.pop()
+        fd = os.open(self._path, os.O_RDONLY | _O_BINARY | _O_NOINHERIT)
+        with self._lock:
+            self._all_fds.append(fd)
+        return fd
 
     def verify_unchanged(self) -> None:
         """Raise :class:`SourceChanged` if size or mtime differ from open time."""
@@ -152,9 +171,11 @@ class RawSource(ReadOnlySource):
                 f"mtime {self._identity.mtime_ns}->{st.st_mtime_ns})")
 
     def close(self) -> None:
-        if self._fd >= 0:
-            os.close(self._fd)
+        with self._lock:
+            fds, self._all_fds, self._free_fds = self._all_fds, [], []
             self._fd = -1
+        for fd in fds:
+            os.close(fd)
 
 
 class SliceSource(ReadOnlySource):

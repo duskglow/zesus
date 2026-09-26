@@ -18,7 +18,13 @@ CREATE TABLE IF NOT EXISTS sources (
     mtime_ns    INTEGER,
     is_device   INTEGER NOT NULL,
     sha256      TEXT,
-    opened_at   TEXT NOT NULL
+    opened_at   TEXT NOT NULL,
+    -- multi-disk pools: which vdev member this file is (NULL for single-disk maps)
+    pool_guid   TEXT,
+    member_guid TEXT,
+    vdev_top    INTEGER,
+    child_id    INTEGER,
+    role        TEXT                     -- member | duplicate | other
 );
 
 -- One row per unit of work. The scanner marks rows done inside the same transaction as
@@ -65,7 +71,10 @@ CREATE TABLE IF NOT EXISTS vdevs (
     size         INTEGER,
     asize        INTEGER,
     ashift       INTEGER,
-    present      INTEGER NOT NULL
+    present      INTEGER NOT NULL,
+    child_id     INTEGER,                 -- position within the top-level vdev (RAIDZ column)
+    source_id    INTEGER,                 -- sources.id of the file holding this member
+    state        TEXT                     -- present | missing | stale | duplicate
 );
 
 CREATE TABLE IF NOT EXISTS labels (
@@ -147,7 +156,7 @@ CREATE TABLE IF NOT EXISTS carved (
     pool_id     INTEGER NOT NULL REFERENCES pools(id),
     vdev_top    INTEGER NOT NULL,
     dva_offset  INTEGER NOT NULL,          -- DVA-space offset
-    phys        INTEGER NOT NULL,          -- absolute source offset
+    phys        INTEGER NOT NULL,          -- absolute source offset (RAIDZ: in member file)
     kind        TEXT NOT NULL,             -- objset | indirect | dnodes | zap | ...
     comp        INTEGER NOT NULL,          -- compression seen (15=lz4, 2=off)
     psize_hint  INTEGER NOT NULL,          -- bytes consumed on disk (from lz4 header), rounded
@@ -159,7 +168,8 @@ CREATE TABLE IF NOT EXISTS carved (
     min_birth   INTEGER,
     max_birth   INTEGER,
     os_type     INTEGER,                   -- objset: objset type
-    info_json   TEXT
+    info_json   TEXT,
+    member      INTEGER                    -- RAIDZ: child id holding the first data column
 );
 CREATE INDEX IF NOT EXISTS carved_kind ON carved(kind, child_type, child_level);
 CREATE INDEX IF NOT EXISTS carved_dva ON carved(vdev_top, dva_offset);

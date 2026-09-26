@@ -172,40 +172,59 @@ def phase_datasets(ctx: ScanContext) -> None:
 
 @phase("carve")
 def phase_carve(ctx: ScanContext) -> bool:
-    """Scan every allocatable byte of each present vdev for ZFS metadata blocks."""
+    """Scan every allocatable byte of each present vdev for ZFS metadata blocks.
+
+    Single disks are carved in DVA space. A mirror is carved once, through its
+    healthiest child (every child holds the same blocks). RAIDZ is carved by row ranges
+    across its member disks (see :mod:`zesus.carve.raidz_carve`).
+    """
+    from ..carve.raidz_carve import run_raidz_carve
+
     opts = ctx.options
     partial = opts.get("carve_start") is not None or opts.get("carve_end") is not None
     for pool in ctx.pools:
         pid = ctx.pool_ids[pool.guid]
-        for im in pool.vdev_images:
-            vt = (im.config or {}).get("vdev_tree", {})
-            top = vt.get("id", 0)
-            asize = vt.get("asize") or (im.source.size - (4 << 20) - (512 << 10))
-            lim = PoolLimits(n_vdevs=max(1, pool.config.get("vdev_children", 1)),
-                             vdev_asize=max(t.asize for t in pool.vdevs.top.values()),
-                             max_txg=pool.max_txg)
-            target = CarveTarget(pool_id=pid, vdev_top=top, source=im.source, base_phys=im.base_offset,
-                                 asize=asize, ashift=vt.get("ashift", 9))
+        lim = PoolLimits(n_vdevs=max(1, pool.config.get("vdev_children", 1)),
+                         vdev_asize=max(t.asize for t in pool.vdevs.top.values()),
+                         max_txg=pool.max_txg)
+        for top_id, top in sorted(pool.vdevs.top.items()):
             last = [0.0]
 
-            def progress(pos: int, end: int, st, rate: float, last=last, top=top) -> None:
+            def progress(pos: int, end: int, st, rate: float, last=last, top_id=top_id) -> None:
                 import time
                 t = time.monotonic()
                 if t - last[0] >= opts.get("progress_interval", 30):
                     last[0] = t
                     eta = (end - pos) / rate if rate else 0
                     log.info("carve vdev %d: %5.1f%%  %.0f MB/s  ETA %dm  (chunk: %d candidates, %d hits %s)",
-                             top, 100 * pos / end, rate / 1e6, eta // 60, st.candidates, st.hits, st.by_kind)
+                             top_id, 100 * pos / end, rate / 1e6, eta // 60, st.candidates, st.hits, st.by_kind)
 
-            ok = run_carve(ctx.db, target, lim, chunk_size=opts.get("chunk_size", 64 << 20),
-                           start=opts.get("carve_start") or 0, end=opts.get("carve_end"),
-                           stop=ctx.stop, progress=progress)
+            common = {"chunk_size": opts.get("chunk_size", 64 << 20), "start": opts.get("carve_start") or 0,
+                      "end": opts.get("carve_end"), "stop": ctx.stop, "progress": progress}
+            if top.unsupported:
+                log.error("vdev %d not carved: %s", top_id, top.unsupported)
+                ctx.db.event("error", "carve", f"vdev {top_id} not carved: {top.unsupported}")
+                continue
+            if not top.children:
+                log.warning("vdev %d: no member present; nothing to carve", top_id)
+                continue
+            if top.type == "raidz":
+                im0 = next(im for im in pool.vdev_images if im.source is top.children[0].source)
+                ok = run_raidz_carve(ctx.db, pid, top, im0.base_offset, lim, **common)
+            else:
+                leaf = sorted(top.children, key=lambda lf: lf.errors)[0]
+                im = next(im for im in pool.vdev_images if im.source is leaf.source)
+                vt = (im.config or {}).get("vdev_tree", {})
+                asize = top.asize or vt.get("asize") or (im.source.size - (4 << 20) - (512 << 10))
+                target = CarveTarget(pool_id=pid, vdev_top=top_id, source=im.source,
+                                     base_phys=im.base_offset, asize=asize, ashift=top.ashift)
+                ok = run_carve(ctx.db, target, lim, **common)
             if not ok:
                 return False
             counts = dict(ctx.db.execute("SELECT kind, count(*) FROM carved WHERE pool_id=? GROUP BY kind",
                                          (pid,)).fetchall())
-            log.info("carving of pool %s vdev %d complete: %s", pool.name, top, counts)
-            ctx.db.event("info", "carve", f"carving complete for vdev {top}", counts=counts)
+            log.info("carving of pool %s vdev %d complete: %s", pool.name, top_id, counts)
+            ctx.db.event("info", "carve", f"carving complete for vdev {top_id}", counts=counts)
     return not partial
 
 

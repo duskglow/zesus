@@ -74,6 +74,33 @@ class Stop:
             pass  # not in main thread
 
 
+def prefilter(arr: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Vectorized candidate tests over an (nblocks, blocksize) uint8 array.
+
+    Returns (objset_mask, lz4_be_length, lz4_candidate_indices):
+    * an uncompressed ``objset_phys_t`` (meta-dnode type byte, nblkptr, os_type);
+    * a plausible ZFS-LZ4 header (a big-endian compressed length, then a first token
+      whose literal run is non-zero).
+    """
+    nb, bs = arr.shape
+    os_type = np.zeros(nb, dtype=np.uint64)
+    if bs >= 1024:
+        os_type = arr[:, 704:712].copy().view("<u8").reshape(nb)
+    m = ((arr[:, 0] == 10) & (arr[:, 3] >= 1) & (arr[:, 3] <= 3) & (arr[:, 2] >= 1)
+         & (arr[:, 2] <= 9) & (arr[:, 1] >= 9) & (arr[:, 1] <= 17)
+         & (os_type >= 1) & (os_type <= 3))
+    be = lz4_be(arr)
+    tok_ok = (arr[:, 4] >> 4) != 0
+    cand = np.nonzero((be >= 8) & (be <= MAX_META_LSIZE - 4) & tok_ok & ~m)[0]
+    return m, be, cand
+
+
+def lz4_be(arr: np.ndarray) -> np.ndarray:
+    """The big-endian uint32 in bytes 0..3 of each row."""
+    return ((arr[:, 0].astype(np.uint32) << 24) | (arr[:, 1].astype(np.uint32) << 16)
+            | (arr[:, 2].astype(np.uint32) << 8) | arr[:, 3].astype(np.uint32))
+
+
 def carve_chunk(raw: bytes, chunk_len: int, dva_base: int, lim: PoolLimits,
                 ashift: int) -> tuple[list[tuple[int, str, int, int, Classified]], ChunkStats]:
     """Classify all candidates whose start lies in raw[0:chunk_len].
@@ -86,13 +113,7 @@ def carve_chunk(raw: bytes, chunk_len: int, dva_base: int, lim: PoolLimits,
     st = ChunkStats(by_kind={})
     hits: list[tuple[int, str, int, int, Classified]] = []
 
-    # --- uncompressed objsets (objset_phys_t is written without compression)
-    os_type = np.zeros(nb, dtype=np.uint64)
-    if bs >= 1024:
-        os_type = arr[:, 704:712].copy().view("<u8").reshape(nb)
-    m = ((arr[:, 0] == 10) & (arr[:, 3] >= 1) & (arr[:, 3] <= 3) & (arr[:, 2] >= 1)
-         & (arr[:, 2] <= 9) & (arr[:, 1] >= 9) & (arr[:, 1] <= 17)
-         & (os_type >= 1) & (os_type <= 3))
+    m, be, cand = prefilter(arr)
     for i in np.nonzero(m)[0]:
         off = int(i) * bs
         for size in (4096, 2048, 1024):
@@ -103,12 +124,6 @@ def carve_chunk(raw: bytes, chunk_len: int, dva_base: int, lim: PoolLimits,
                 hits.append((dva_base + off, "objset", 2, size, c))
                 break
 
-    # --- LZ4 candidates: 4-byte BE length, then an LZ4 block
-    be = (arr[:, 0].astype(np.uint32) << 24) | (arr[:, 1].astype(np.uint32) << 16) \
-        | (arr[:, 2].astype(np.uint32) << 8) | arr[:, 3].astype(np.uint32)
-    # First LZ4 token: a literal run must start the block, so the high nibble is non-zero.
-    tok_ok = (arr[:, 4] >> 4) != 0
-    cand = np.nonzero((be >= 8) & (be <= MAX_META_LSIZE - 4) & tok_ok & ~m)[0]
     st.candidates = len(cand)
     for i in cand:
         off = int(i) * bs

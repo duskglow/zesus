@@ -29,7 +29,9 @@ def _size(s: str) -> int:
 
 
 def add_scan_args(p: argparse.ArgumentParser) -> None:
-    p.add_argument("source", help="raw disk image or block device (opened read-only)")
+    p.add_argument("source", nargs="+",
+                   help="raw disk image(s) or block device(s), opened read-only. For multi-disk "
+                        "pools give one per vdev member, in any order")
     p.add_argument("-o", "--map", required=True, help="output SQLite map (created or resumed)")
     p.add_argument("--phases", default=",".join(DEFAULT_PHASES),
                    help=f"comma-separated phases to run (default: {','.join(DEFAULT_PHASES)})")
@@ -49,14 +51,14 @@ def add_scan_args(p: argparse.ArgumentParser) -> None:
 
 def cmd_scan(args: argparse.Namespace) -> int:
     from ..carve.scanner import Stop
-    from ..io.source import RawSource
+    from ..io.sourceset import SourceSet
     from ..map.db import MapDB
     from ..scan import pipeline
 
     mappath = Path(args.map)
     logsetup.setup(args.verbose, args.log or mappath.with_suffix(".log.jsonl"))
-    log.info("zesus %s: scan %s -> %s", __version__, args.source, mappath)
-    src = RawSource(args.source)
+    log.info("zesus %s: scan %s -> %s", __version__, " ".join(args.source), mappath)
+    src = SourceSet.open(args.source)
     db = MapDB(mappath)
     stop = Stop()
     stop.install()
@@ -76,6 +78,28 @@ def cmd_scan(args: argparse.Namespace) -> int:
         src.close()
     log.info("scan finished; map at %s", mappath)
     return 0
+
+
+def cmd_members(args: argparse.Namespace) -> int:
+    import json
+
+    from ..io.sourceset import SourceSet
+    from ..zfs.members import assess
+    from ..zfs.pool import open_pools
+
+    logsetup.setup(args.verbose)
+    with SourceSet.open(args.sources) as ss:
+        pools = open_pools(ss)
+        if not pools:
+            print("no ZFS pool labels found", file=sys.stderr)
+            return 1
+        reports = [assess(p) for p in pools]
+    if args.json:
+        print(json.dumps([r.as_dict() for r in reports], indent=2))
+    else:
+        for r in reports:
+            print("\n".join(r.lines()))
+    return 0 if all(r.readable for r in reports) else 2
 
 
 def cmd_info(args: argparse.Namespace) -> int:
@@ -119,6 +143,10 @@ def build_parser() -> argparse.ArgumentParser:
     s = sub.add_parser("scan", help="scan a source and build/resume a map")
     add_scan_args(s)
     s.set_defaults(func=cmd_scan)
+    m = sub.add_parser("members", help="identify vdev member images and whether the pool can be read")
+    m.add_argument("sources", nargs="+", help="disk images or devices, one per vdev member (read-only)")
+    m.add_argument("--json", action="store_true")
+    m.set_defaults(func=cmd_members)
     i = sub.add_parser("info", help="summarize a map")
     i.add_argument("map")
     i.set_defaults(func=cmd_info)

@@ -22,7 +22,7 @@ from ..map.db import MapDB, j
 from ..zfs import blkptr
 from ..zfs.blkptr import BlockPointer
 from ..zfs.checksum import compute
-from ..zfs.constants import VDEV_LABEL_START_SIZE, ChecksumType
+from ..zfs.constants import ChecksumType
 from ..zfs.pool import Pool
 from ..zfs.reader import ReadStatus
 from .fastsum import fletcher4_many
@@ -133,9 +133,25 @@ def chosen_blocks(pool: Pool, spans: dict[int, Span], statuses: set[int],
     return {k: v[order] for k, v in wl.items()}
 
 
+def add_extents(pool: Pool, wl: dict[str, np.ndarray]) -> dict[str, np.ndarray]:
+    """Add ``extent``: the DVA-space bytes each block occupies (psize, or the RAIDZ asize
+    including parity and skip sectors), so windows cover every column of every block."""
+    if "blkid" not in wl or not len(wl["blkid"]):
+        return wl
+    ext = wl["psize"].astype(np.int64)
+    for v in np.unique(wl["vdev"]):
+        top = pool.vdevs.top.get(int(v))
+        if top is not None and top.type == "raidz":
+            m = wl["vdev"] == v
+            ext[m] = top.extents(wl["psize"][m])
+    wl["extent"] = ext
+    return wl
+
+
 def windows(wl: dict[str, np.ndarray], window_max: int = WINDOW_MAX, gap_max: int = GAP_MAX):
     """Yield (slice, vdev, start, end): runs of nearby blocks to read in one request."""
     n = len(wl["blkid"])
+    size = wl["extent"] if "extent" in wl else wl["psize"]
     i = 0
     while i < n:
         v = wl["vdev"][i]
@@ -144,7 +160,7 @@ def windows(wl: dict[str, np.ndarray], window_max: int = WINDOW_MAX, gap_max: in
         k = i
         while k < n and wl["vdev"][k] == v:
             o = int(wl["offset"][k])
-            e = o + int(wl["psize"][k])
+            e = o + int(size[k])
             if (o - w_end > gap_max or e - w_start > window_max) and k > i:
                 break
             w_end = max(w_end, e)
@@ -157,16 +173,13 @@ class Verifier:
     def __init__(self, pool: Pool, db: MapDB, volume_id: int, stop=None) -> None:
         self.pool, self.db, self.volume_id, self.stop = pool, db, volume_id, stop
         self.spans = load_spans(db, volume_id)
-        im = pool.vdev_images[0]
-        self.vsrc = im.source            # the vdev slice (DVA space is +4 MiB)
-        if len(pool.vdevs.top) > 1:
-            log.warning("multi-vdev pool: bulk verification reads vdev 0 directly and falls "
-                        "back to per-block reads for other vdevs")
+        self.repaired = 0                # blocks rebuilt from RAIDZ parity in the bulk pass
 
     # ------------------------------------------------------------------ work list
     def build_worklist(self) -> dict[str, np.ndarray]:
         """The chosen, not-yet-verified L0 pointers of every span, in physical order."""
-        return chosen_blocks(self.pool, self.spans, {BlockStatus.UNKNOWN}, label="verify")
+        return add_extents(self.pool, chosen_blocks(self.pool, self.spans, {BlockStatus.UNKNOWN},
+                                                    label="verify"))
 
     # ------------------------------------------------------------------ bulk pass
     def run(self) -> None:
@@ -193,7 +206,7 @@ class Verifier:
                 log.warning("verify: stopped at %d/%d (checkpoint saved)", start + sl.start, n)
                 return
             self._verify_window(sub, sl, v, w_start, w_end, status)
-            done_bytes += w_end - w_start
+            done_bytes += int(sub["psize"][sl].sum())
             i = start + sl.stop
             now = time.monotonic()
             if now - last_ck > CKPT_EVERY_S:
@@ -203,30 +216,36 @@ class Verifier:
                 rem = float(wl["psize"][i:].sum()) if i < n else 0
                 log.info("verify: %5.1f%%  %.0f MB/s  ETA %dm", 100 * i / n, rate / 1e6, rem / rate // 60 if rate else 0)
         self._save_ckpt(n, status)
+        if self.repaired:
+            log.info("verify: %d blocks were rebuilt from RAIDZ parity (each checked against its "
+                     "block pointer's checksum)", self.repaired)
+            self.db.event("info", "verify", f"{self.repaired} blocks rebuilt from RAIDZ parity",
+                          volume_id=self.volume_id)
         self.fallback(status)
         self.write_back(status)
         self._clear_ckpt()
 
     def _verify_window(self, wl, sl, vdev: int, start: int, end: int, status: np.ndarray) -> None:
         blkid = wl["blkid"][sl]
-        offs = wl["offset"][sl].astype(np.int64) - start
         psz = wl["psize"][sl]
         ctype = wl["ctype"][sl]
         gang = wl["gang"][sl]
         expect = wl["cksum"][sl]
-        if vdev == 0 and 0 in self.pool.vdevs.top:
-            buf = self.vsrc.pread(VDEV_LABEL_START_SIZE + start, end - start)
-        else:
-            buf = b""
+        top = self.pool.vdevs.top.get(vdev)
+        buf, offs, avail = b"", np.zeros(len(blkid), np.int64), np.zeros(len(blkid), bool)
+        if top is not None and not top.unsupported:
+            win = top.read_window(start, end)
+            buf, offs, avail = win.gather(wl["offset"][sl], psz)
+            self.repaired += win.repaired
         ok = np.zeros(len(blkid), dtype=bool)
-        f4 = (ctype == ChecksumType.FLETCHER_4) & ~gang & (offs + psz <= len(buf))
+        f4 = (ctype == ChecksumType.FLETCHER_4) & ~gang & avail
         if f4.any():
             got = fletcher4_many(buf, offs[f4], psz[f4])
             ok[f4] = (got == expect[f4]).all(axis=1)
         others = np.nonzero(~f4)[0]
         for idx in others:
             o, p = int(offs[idx]), int(psz[idx])
-            if gang[idx] or o + p > len(buf):
+            if gang[idx] or not avail[idx]:
                 ok[idx] = False       # handled per-block in fallback
                 continue
             try:
@@ -238,7 +257,7 @@ class Verifier:
         bad = np.nonzero(~ok)[0]
         for idx in bad:
             o, p = int(offs[idx]), int(psz[idx])
-            seg = buf[o:o + p] if o + p <= len(buf) else b""
+            seg = buf[o:o + p] if avail[idx] else b""
             status[blkid[idx]] = BlockStatus.ZEROED if seg and not any(seg) else BlockStatus.CKSUM_MISMATCH
 
     # ------------------------------------------------------------------ fallback
