@@ -38,3 +38,10 @@ def test_anchored_cluster_excludes_other_datasets():
     rec = make(sigs)
     (members,) = rec.cluster([R("x"), R("y"), R("other")], anchors=[R("ring")])
     assert sorted(r.name for r in members) == ["x", "y"]
+
+
+def test_roots_with_unreadable_top_are_dropped_not_phantom_volumes():
+    sigs = {"a1": {1, 2}, "a2": {2, 3}, "dead1": None, "dead2": None}
+    rec = make(sigs)
+    groups = rec.cluster([R(n) for n in sigs])
+    assert names(groups) == [["a1", "a2"]]

@@ -250,13 +250,20 @@ def phase_reconstruct(ctx: ScanContext) -> bool:
             if r.geometry not in known_geoms:
                 by_geom[r.geometry].append(r)
         # same geometry is not enough: split into datasets by shared tree blocks
-        groups = [(g, cl) for g, rs in by_geom.items() for cl in probe.cluster(rs)]
+        groups = [(g, cl) for g, rs in by_geom.items() for cl in probe.cluster(rs) if cl]
+        used_names: dict[str, int] = {}
         for n, (geom, roots) in enumerate(sorted(groups, key=lambda kv: -len(kv[1]))):
             _nlevels, maxblkid, dblksz, _ = geom
             volsize = next((r.volsize for r in roots if r.volsize), None) or (maxblkid + 1) * dblksz
             lo, hi = min(r.txg for r in roots), max(r.txg for r in roots)
             match = _match_history(ctx, pid, lo, hi, volsize)
             name = match["name"] if match else f"carved-zvol-{n + 1}"
+            if name in used_names:
+                # a second, disconnected set of generations of the same dataset
+                used_names[name] += 1
+                name = f"{name} (fragment {used_names[name]})"
+            else:
+                used_names[name] = 1
             log.info("carved volume group %d: %d root(s), txg %d..%d, volsize %d, blocksize %d -> %s%s",
                      n + 1, len(roots), lo, hi, volsize, dblksz, name,
                      f" (matched history dsobj {match['dsobj']})" if match else " (no history match)")

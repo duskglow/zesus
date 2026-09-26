@@ -172,14 +172,20 @@ class VolumeReconstructor:
         return im.source.read_exact(phys - im.base_offset, n)
 
     # ------------------------------------------------------------------ association
-    def signature(self, root: Root, depth: int = 2) -> set[tuple]:
+    def signature(self, root: Root, depth: int = 2) -> set[tuple] | None:
         """DVA keys of the top block and its descendants down *depth* levels (upper tree only).
 
         Copy-on-write generations of one dataset share every subtree that did not change
         between them. Different datasets never share blocks (clones and dedup aside).
+        Returns None when the top block itself is unreadable: such a root carries no
+        information and must not become a (phantom) volume of its own.
         """
-        sig = {bp_key(root.top_bp)}
-        frontier = [root.top_bp]
+        top = root.top_bp
+        if not top.is_hole and not top.embedded:
+            if not self.r.read(top).data:
+                return None
+        sig = {bp_key(top)}
+        frontier = [top]
         for _ in range(depth):
             nxt = []
             for bp in frontier:
@@ -202,8 +208,19 @@ class VolumeReconstructor:
         Roots sharing nothing with the anchors are left out and reported, never merged by
         size alone.
         """
-        allr = (anchors or []) + roots
-        sigs = [self.signature(r) for r in allr]
+        anchors = anchors or []
+        sig_a = [self.signature(r) or {bp_key(r.top_bp)} for r in anchors]
+        kept, sig_r = [], []
+        for r in roots:
+            sg = self.signature(r)
+            if sg is not None:
+                kept.append(r)
+                sig_r.append(sg)
+        if len(kept) < len(roots):
+            log.info("%d carved root(s) dropped: their top-level block has since been overwritten",
+                     len(roots) - len(kept))
+        allr = anchors + kept
+        sigs = sig_a + sig_r
         parent = list(range(len(allr)))
 
         def find(i: int) -> int:
@@ -229,7 +246,7 @@ class VolumeReconstructor:
                 log.info("%d carved root(s) with the same geometry share no blocks with %s and were "
                          "not merged into it", others, self.ds.get("name"))
             return [members]
-        return [[allr[i] for i in g] for g in groups.values()]
+        return [[allr[i] for i in g] for g in groups.values() if g]
 
     # ------------------------------------------------------------------ helpers
     def read_many(self, cands: Iterable[Cand], keep_data: bool = True,
