@@ -4,13 +4,13 @@ build-backend = "hatchling.build"
 
 [project]
 name = "zesus"
-version = "0.1.0.dev0"
+version = "0.1.0a1"
 description = "Forensic scanner and extractor for ZFS pools, including destroyed datasets and zvols"
 readme = "README.md"
 license = "Apache-2.0"
 license-files = ["LICENSE"]
 requires-python = ">=3.10"
-authors = [{ name = "Zesus contributors" }]
+authors = [{ name = "Zesus contributors", email = "dev@koiren.ai" }]
 keywords = ["zfs", "forensics", "data recovery", "zvol", "ext4", "carving"]
 classifiers = [
     "Development Status :: 3 - Alpha",
@@ -49,8 +49,8 @@ gpt = "zesus.partitions.gpt:GptScheme"
 mbr = "zesus.partitions.mbr:MbrScheme"
 
 [project.urls]
-Homepage = "https://github.com/OWNER/zesus"
-Issues = "https://github.com/OWNER/zesus/issues"
+Homepage = "https://github.com/duskglow/zesus"
+Issues = "https://github.com/duskglow/zesus/issues"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/zesus"]
