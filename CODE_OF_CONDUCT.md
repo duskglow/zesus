@@ -39,7 +39,9 @@ Contributors are free to hold and express any views they like outside project sp
 However, directing public attacks, harassment or bad-faith criticism at the project, its
 maintainers or its community from outside project spaces is incompatible with contributing
 to it. Honest, good-faith criticism is always welcome, wherever it is made: a public bug
-report, a critical review, or a write-up of where Zesus failed you.
+report, a critical review, or a write-up of where Zesus failed you. (Though we would prefer
+that you raise it with us first, so that we can make sure no one else has to deal with the
+same problem.)
 
 If someone brings politics in, **do not reply to it**. Report it to the maintainers, who
 will remove or hide the content and, if needed, lock the thread. Repeated or deliberate
