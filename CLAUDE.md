@@ -86,7 +86,8 @@ For fast iteration on a big image, use a small slice:
 * **Plugins** register via entry points (`zesus.filesystems`, `zesus.partitions`,
   `zesus.identifiers`). Core must not import plugin-specific code, except the built-ins
   in the registries.
-* Commit messages: imperative subject, a body explaining *why*.
+* Commit messages: imperative subject, a body explaining *why*. Follow [AI_POLICY.md](AI_POLICY.md): state only what
+  was actually done and tested, and keep the `Co-Authored-By` trailer on AI-assisted commits.
 
 ## Status and next steps
 

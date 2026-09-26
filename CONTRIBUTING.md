@@ -14,6 +14,11 @@ ruff check src tests
 
 Integration tests run against a real ZFS image when `ZESUS_TEST_IMAGE` is set.
 
+## Using AI tools
+
+AI-assisted contributions are welcome. You remain responsible for everything you submit:
+test it, review it, and keep commit messages factual. See [AI_POLICY.md](AI_POLICY.md).
+
 ## Ground rules
 
 * **The source is sacred.** Nothing may write to the evidence. All access goes through

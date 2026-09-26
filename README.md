@@ -107,7 +107,7 @@ New filesystems are plugins and need no change to core code. See
 * [docs/architecture.md](docs/architecture.md): phases, reconstruction algorithm, block statuses
 * [docs/map-format.md](docs/map-format.md): the SQLite map and useful queries
 * [docs/writing-plugins.md](docs/writing-plugins.md): adding filesystem support
-* [CONTRIBUTING.md](CONTRIBUTING.md)
+* [CONTRIBUTING.md](CONTRIBUTING.md) and [AI_POLICY.md](AI_POLICY.md): this project was written with Claude Code; AI-assisted contributions are welcome under the same standards
 
 ## Development
 
