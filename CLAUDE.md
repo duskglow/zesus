@@ -126,3 +126,15 @@ Open items, roughly by value:
 4. More filesystem plugins: XFS and NTFS inventory (identification exists already).
 5. Verification of zvol **snapshots** as their own volumes.
 6. Encrypted datasets (with a user-supplied key).
+
+Before the next release (web UI):
+* Serve the page the backend was started with, and check page/API versions. A server
+  started before an upgrade served the new page to an old API, which gave a blank Jobs
+  page. On a mismatch, say "restart when idle" instead.
+* Run web jobs as separate processes that publish progress to the map (as CLI scans do),
+  and keep the job list in the map. A restart then neither kills nor forgets a job, and
+  the page can reload itself when the backend comes back.
+* Push job updates (server-sent events) instead of polling.
+* Faster file extraction: files are read one block at a time through LogicalVolume.
+  Batch each file's blocks, in physical order, through the same windowed path volume
+  extraction uses.
