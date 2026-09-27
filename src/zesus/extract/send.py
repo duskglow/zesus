@@ -253,10 +253,12 @@ def _rsync(tools, opts, host, dpath, root: Path, fs_id: int, batch: list, local_
     stubs = [local_rel[r["path"]].as_posix() + ".symlink" for r in batch
              if r["type"] == "symlink" and sys.platform == "win32"]
     excludes = opts.staging / f".zesus-send-excludes-fs{fs_id}.txt"
-    excludes.write_text("\n".join(["*.gaps.json", "/manifest.json", *[f"/{s}" for s in stubs]]) + "\n",
+    excludes.write_text("\n".join(["*.gaps.json", "*.zesus-writing", "/manifest.json", *[f"/{s}" for s in stubs]]) + "\n",
                         encoding="utf-8", newline="\n")
-    rs = ["rsync", "-rlt", "--partial", "--info=progress2", "--out-format=SENT %n",
-          f"--exclude-from={tools.path(excludes)}"]
+    # --partial-dir: an interrupted transfer is kept aside, not under the real name, where
+    # --ignore-existing would later mistake it for a complete file and skip it.
+    rs = ["rsync", "-rlt", "--partial-dir=.zesus-rsync-partial", "--info=progress2",
+          "--out-format=SENT %n", f"--exclude-from={tools.path(excludes)}"]
     if not opts.overwrite:
         rs.append("--ignore-existing")
     if opts.dry_run:

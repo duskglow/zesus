@@ -23,3 +23,19 @@ def test_set_size_extends_without_writing(tmp_path):
         assert f.read(4) == b"data"
         f.seek((64 << 30) - 8)
         assert f.read() == b"\0" * 8
+
+
+def test_interrupted_output_never_appears_under_its_real_name(tmp_path):
+    import pytest
+
+    from zesus.extract.engine import WRITING_SUFFIX, Extractor, Options
+    ex = Extractor(None, None, Options(out_dir=tmp_path))
+    target = tmp_path / "f.bin"
+    with pytest.raises(RuntimeError), ex._open_out(target, 1 << 20) as f:
+        f.write(b"half")
+        raise RuntimeError("interrupted")
+    assert not target.exists()                    # a resumed run must not trust it
+    assert (tmp_path / ("f.bin" + WRITING_SUFFIX)).exists()
+    with ex._open_out(target, 4) as f:
+        f.write(b"done")
+    assert target.read_bytes() == b"done"

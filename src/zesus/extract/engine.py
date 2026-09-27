@@ -18,6 +18,7 @@ import os
 import re
 import sys
 from collections.abc import Iterable
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -39,6 +40,7 @@ from .sparse import make_sparse, set_size
 log = logging.getLogger(__name__)
 
 GAP_PATTERN = b"<<ZESUS:UNRECOVERABLE>>\n"
+WRITING_SUFFIX = ".zesus-writing"      # an output still being written
 
 
 @dataclass
@@ -92,16 +94,28 @@ class Extractor:
         self.out = out
 
     # ------------------------------------------------------------------ helpers
+    @contextmanager
     def _open_out(self, path: Path, size: int):
+        """Write *path* under a temporary name, renamed into place only when the block
+        finishes. An interrupted run therefore never leaves a full-size but half-written
+        file under the real name (outputs are pre-sized, so size alone proves nothing)."""
         guard.assert_not_protected([path])
         if path.exists() and not self.opts.force:
             raise FileExistsError(f"{path} exists (use --force to overwrite)")
         path.parent.mkdir(parents=True, exist_ok=True)
-        f = open(path, "wb")
-        if self.opts.sparse:
-            make_sparse(f)
-        set_size(f, size)            # never f.truncate(): on Windows that writes zeros
-        return f
+        tmp = path.with_name(path.name + WRITING_SUFFIX)
+        guard.assert_not_protected([tmp])
+        f = open(tmp, "wb")
+        try:
+            if self.opts.sparse:
+                make_sparse(f)
+            set_size(f, size)        # never f.truncate(): on Windows that writes zeros
+            yield f
+        except BaseException:
+            f.close()
+            raise
+        f.close()
+        os.replace(tmp, path)
 
     def _fill(self, f, offset: int, length: int) -> None:
         if self.opts.fill != "pattern" or length <= 0:
