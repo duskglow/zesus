@@ -66,6 +66,12 @@ def add_extract_parser(sub) -> None:
     sd.add_argument("--to", required=True, metavar="DEST", help="user@host:/path, or a local directory")
     sd.add_argument("--staging", help="local staging directory (default: <map dir>/staging)")
     sd.add_argument("--ssh", default="", help='extra ssh options, e.g. "-p 2222 -i ~/.ssh/id_ed25519"')
+    sd.add_argument("--ssh-command", default="ssh",
+                    help="ssh program rsync uses (under WSL, /mnt/c/Windows/System32/OpenSSH/ssh.exe uses "
+                         "the Windows keys and known hosts)")
+    sd.add_argument("--batch", default="0", metavar="SIZE",
+                    help="stage, send and delete this much at a time (e.g. 50G), for selections larger "
+                         "than the local disk; resumable")
     sd.add_argument("--sudo", action="store_true",
                     help="run rsync and the restore script as root on the destination (sudo -n); restores owners")
     sd.add_argument("--overwrite", action="store_true", help="replace files that already exist at the destination")
@@ -211,7 +217,9 @@ def cmd_send(args: argparse.Namespace) -> int:
     except EvidenceError as exc:
         raise SystemExit(str(exc)) from exc
     staging = Path(args.staging) if args.staging else Path(args.map).resolve().parent / "staging"
+    from .main import _size
     opts = SendOptions(dest=args.to, staging=staging, ssh_args=shlex.split(args.ssh), overwrite=args.overwrite,
+                       ssh_command=args.ssh_command, batch_bytes=_size(args.batch),
                        include_partial=args.include_partial, dry_run=args.dry_run, sudo=args.sudo,
                        metadata=not args.no_metadata)
     res = send(db, pool, args.fs, args.path or None, opts)

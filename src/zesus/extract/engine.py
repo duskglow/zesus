@@ -336,7 +336,11 @@ class Extractor:
 
     # ------------------------------------------------------------------ files
     def extract_files(self, fs_id: int, patterns: list[str] | None = None, statuses: set[str] | None = None,
-                      include_deleted: bool = True) -> None:
+                      include_deleted: bool = True, *, entries: list | None = None,
+                      local_rel: dict[str, Path] | None = None) -> None:
+        """Extract matching entries. *entries* (already selected rows) and *local_rel* (their
+        local names) let a caller extract a large selection in batches with names that stay
+        consistent across batches."""
         fs = self.db.execute("SELECT * FROM filesystems WHERE id=?", (fs_id,)).fetchone()
         if fs is None:
             raise KeyError(f"no filesystem {fs_id}")
@@ -345,11 +349,14 @@ class Extractor:
         else:
             src_reader = LogicalVolume(self.pool, self.db, fs["volume_id"])
         root = self.fs_root(fs)
-        sel = self.select(fs_id, patterns, statuses, include_deleted)
+        sel = entries if entries is not None else self.select(fs_id, patterns, statuses, include_deleted)
         self.last_selection = sel
-        namer = LocalNamer()
-        for r in sel:                                  # path order: deterministic local names
-            self.local_rel[r["path"]] = namer.local(r["path"])
+        if local_rel is not None:
+            self.local_rel = local_rel
+        else:
+            namer = LocalNamer()
+            for r in sel:                              # path order: deterministic local names
+                self.local_rel[r["path"]] = namer.local(r["path"])
         log.info("extracting %d entries from filesystem %d into %s", len(sel), fs_id, root)
         # order files by their first data extent to reduce seeking
         firsts = {r["id"]: (self.db.execute("SELECT min(volume_offset) FROM fs_extents WHERE entry_id=?",

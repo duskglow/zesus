@@ -21,6 +21,11 @@ Safety defaults:
 * metadata is applied only to what this run created, so an existing tree keeps its own
   permissions;
 * gap reports, manifests and Windows symlink stubs stay local.
+
+With ``batch_bytes``, a selection larger than the local disk is sent in batches: stage
+about that much, rsync it, delete the staged copies, and repeat. Names and metadata are
+restored once at the end. A ledger in the staging directory records what has been sent,
+so an interrupted run resumes without re-extracting it.
 """
 
 from __future__ import annotations
@@ -39,7 +44,7 @@ from pathlib import Path, PureWindowsPath
 
 from ..map.db import MapDB
 from ..zfs.pool import Pool
-from .engine import Extractor, Options
+from .engine import Extractor, LocalNamer, Options, select_entries
 
 log = logging.getLogger(__name__)
 
@@ -55,6 +60,8 @@ class SendOptions:
     sudo: bool = False                          # remote rsync + restore script as root (sudo -n)
     metadata: bool = True
     owners: bool | None = None                  # chown; default: only with sudo
+    ssh_command: str = "ssh"                    # e.g. Windows' ssh.exe, to use its keys from WSL
+    batch_bytes: int = 0                        # >0: stage, send and delete this much at a time
 
 
 @dataclass
@@ -122,22 +129,128 @@ def send(db: MapDB, pool: Pool, fs_id: int, patterns: list[str] | None, opts: Se
     if fs is None:
         raise KeyError(f"no filesystem {fs_id}")
 
-    # ---- 1. stage
     statuses = {"full", "partial"} if opts.include_partial else {"full"}
-    ex = Extractor(db, pool, Options(out_dir=opts.staging, skip_existing=True))
-    say(f"staging into {opts.staging}")
-    ex.extract_files(fs_id, patterns=patterns, statuses=statuses)
-    root = ex.fs_root(fs)
-    res.staged = sum(1 for r in ex.records if r.kind == "file")
-    sel = ex.last_selection
-    everything = ex.select(fs_id, patterns, None)
+    everything = select_entries(db, fs_id, patterns, None)
+    sel = [r for r in everything if r["type"] not in ("file", "symlink") or r["status"] in statuses]
     res.held_back_partial = 0 if opts.include_partial else sum(
         1 for r in everything if r["type"] == "file" and r["status"] == "partial")
     res.unrecoverable = sum(1 for r in everything if r["type"] == "file" and r["status"] == "none")
-    ex.write_manifest({"purpose": "staging for zesus send"})
+    namer = LocalNamer()
+    local_rel = {r["path"]: namer.local(r["path"]) for r in sel}       # path order: stable names
+    opts.staging.mkdir(parents=True, exist_ok=True)
+    ledger = opts.staging / f".zesus-sent-fs{fs_id}.txt"
+    sent_all: set[str] = set()      # created on the destination by zesus (metadata is restored on these)
+    done: set[str] = set()          # sent, or already present at the destination: skip on resume
+    if ledger.exists() and not opts.dry_run:
+        for line in ledger.read_text(encoding="utf-8", errors="surrogateescape").splitlines():
+            kind, _, name = line.partition(" ")
+            done.add(name)
+            if kind == "SENT":
+                sent_all.add(name)
+        if done:
+            say(f"resuming: {len(done)} entries already done (ledger {ledger})")
+    batches = _batches(db, sel, local_rel, done, opts.batch_bytes)
+    ex = None
+    for bi, batch in enumerate(batches, 1):
+        # ---- 1. stage
+        ex = Extractor(db, pool, Options(out_dir=opts.staging, skip_existing=True))
+        size = sum(r["size"] or 0 for r in batch if r["type"] == "file")
+        say(f"batch {bi}/{len(batches)}: staging {sum(1 for r in batch if r['type'] == 'file')} files "
+            f"({size / (1 << 30):.1f} GiB) into {opts.staging}")
+        ex.extract_files(fs_id, entries=batch, local_rel=local_rel)
+        root = ex.fs_root(fs)
+        res.staged += sum(1 for r in ex.records if r.kind == "file")
+        ex.write_manifest({"purpose": "staging for zesus send"})
+        # ---- 2. rsync
+        sent, err = _rsync(tools, opts, host, dpath, root, fs_id, batch, local_rel, say)
+        if err is not None:
+            res.errors.append(err)
+            say(err)
+            return res
+        sent_all |= set(sent)
+        res.sent += sum(1 for x in sent if not x.endswith("/"))
+        if not opts.dry_run:
+            with open(ledger, "a", encoding="utf-8", errors="surrogateescape", newline="\n") as f:
+                f.writelines(f"SENT {x}\n" for x in sent)
+                # files the destination already had: done, but not ours to change
+                f.writelines(f"HAD {local_rel[r['path']].as_posix()}\n" for r in batch
+                             if r["type"] == "file" and local_rel[r["path"]].as_posix() not in sent)
+        if opts.batch_bytes and not opts.dry_run:
+            freed = _unstage(root, batch, local_rel)
+            say(f"batch {bi}: sent; removed {freed / (1 << 30):.1f} GiB of staged copies")
+    say(f"rsync: {res.sent} files {'would be ' if opts.dry_run else ''}sent")
+    if ex is None:
+        say("nothing left to send")
+        ex = Extractor(db, pool, Options(out_dir=opts.staging, skip_existing=True))
+    sent = sent_all
 
-    # ---- 2. rsync
-    stubs = [ex.local_rel[r["path"]].as_posix() + ".symlink" for r in sel
+    # ---- 3. restore names and metadata
+    if not opts.metadata or not sent:
+        return res
+    owners = opts.sudo if opts.owners is None else opts.owners
+    script = build_restore_script(sel, local_rel, set(sent), owners)
+    sp = opts.staging / f".zesus-restore-fs{fs_id}.sh"
+    sp.write_text(script, encoding="utf-8", newline="\n")
+    res.script = str(sp)
+    if opts.dry_run:
+        say(f"dry run: restore script written to {sp} (not executed)")
+        return res
+    sh = "sudo -n sh -s" if opts.sudo else "sh -s"
+    if host:
+        remote = [*opts.ssh_args, host, f"cd {shlex.quote(dpath)} && {sh}"]
+        win_ssh = _windows_exe(opts.ssh_command) if tools.mode == "wsl" else None
+        # A Windows ssh.exe given to WSL's rsync is run natively here: piping stdin from
+        # Python through WSL into a Windows program loses it.
+        cmd = [win_ssh, *remote] if win_ssh else tools.cmd([opts.ssh_command, *remote])
+    else:
+        cmd = tools.cmd(["sh", "-c", f"cd {shlex.quote(tools.path(dpath))} && {sh}"])
+    say("restoring original names, symlinks, owners, modes and times on the destination")
+    p = subprocess.run(cmd, input=script.encode("utf-8"), capture_output=True)
+    out, errtxt = p.stdout.decode("utf-8", "replace"), p.stderr.decode("utf-8", "replace")
+    if p.returncode != 0:
+        res.errors.append(f"restore script failed ({p.returncode}): {errtxt.strip()[-2000:]}")
+    m = re.search(r"ZESUS-RESTORED (\d+)", out)
+    res.restored = int(m.group(1)) if m else 0
+    if p.returncode != 0:                      # stderr alone may just be a login banner
+        res.errors += [ln for ln in errtxt.splitlines()[:20] if ln.strip()]
+    say(f"restored metadata on {res.restored} entries")
+    return res
+
+
+def _windows_exe(cmd: str) -> str | None:
+    """'/mnt/c/Windows/System32/OpenSSH/ssh.exe' -> 'C:/Windows/System32/OpenSSH/ssh.exe'."""
+    m = re.match(r"^/mnt/([a-zA-Z])/(.+\.exe)$", cmd)
+    return f"{m.group(1).upper()}:/{m.group(2)}" if m and sys.platform == "win32" else None
+
+
+def _batches(db: MapDB, sel: list, local_rel: dict, done: set[str], batch_bytes: int) -> list[list]:
+    """Split a selection into batches of about *batch_bytes* of file data, in on-disk order
+    (to keep reads sequential). Directories and symlinks go with the first batch. Entries in
+    *done* (already sent) are left out."""
+    todo = [r for r in sel if not (r["type"] == "file" and local_rel[r["path"]].as_posix() in done)]
+    other = [r for r in todo if r["type"] != "file"]
+    files = [r for r in todo if r["type"] == "file"]
+    if not batch_bytes:
+        return [todo] if files or other else []
+    first = {}
+    for r in files:
+        first[r["id"]] = db.execute("SELECT min(volume_offset) FROM fs_extents WHERE entry_id=?",
+                                    (r["id"],)).fetchone()[0] or 0
+    files.sort(key=lambda r: first[r["id"]])
+    out: list[list] = [list(other)]
+    acc = 0
+    for r in files:
+        if acc >= batch_bytes and out[-1]:
+            out.append([])
+            acc = 0
+        out[-1].append(r)
+        acc += r["size"] or 0
+    return [b for b in out if b]
+
+
+def _rsync(tools, opts, host, dpath, root: Path, fs_id: int, batch: list, local_rel: dict,
+           say) -> tuple[list[str], str | None]:
+    stubs = [local_rel[r["path"]].as_posix() + ".symlink" for r in batch
              if r["type"] == "symlink" and sys.platform == "win32"]
     excludes = opts.staging / f".zesus-send-excludes-fs{fs_id}.txt"
     excludes.write_text("\n".join(["*.gaps.json", "/manifest.json", *[f"/{s}" for s in stubs]]) + "\n",
@@ -149,7 +262,7 @@ def send(db: MapDB, pool: Pool, fs_id: int, patterns: list[str] | None, opts: Se
     if opts.dry_run:
         rs.append("--dry-run")
     if host:
-        rs += ["-e", " ".join(["ssh", *map(shlex.quote, opts.ssh_args)])]
+        rs += ["-e", " ".join([shlex.quote(opts.ssh_command), *map(shlex.quote, opts.ssh_args)])]
         if opts.sudo:
             rs.append("--rsync-path=sudo -n rsync")
         target = f"{host}:{dpath.rstrip('/')}/"
@@ -157,42 +270,27 @@ def send(db: MapDB, pool: Pool, fs_id: int, patterns: list[str] | None, opts: Se
         if tools.mode == "native" and not opts.dry_run:
             Path(dpath).mkdir(parents=True, exist_ok=True)
         target = tools.path(dpath).rstrip("/") + "/"
+    root.mkdir(parents=True, exist_ok=True)
     rs += [tools.path(root).rstrip("/") + "/", target]
     say(f"rsync{' (dry run)' if opts.dry_run else ''} → {opts.dest}")
-    sent, err = _run_rsync(tools.cmd(rs), say)
-    if err is not None:
-        res.errors.append(err)
-        say(err)
-        return res
-    res.sent = sum(1 for s in sent if not s.endswith("/"))
-    say(f"rsync: {res.sent} files {'would be ' if opts.dry_run else ''}sent")
+    return _run_rsync(tools.cmd(rs), say)
 
-    # ---- 3. restore names and metadata
-    if not opts.metadata:
-        return res
-    owners = opts.sudo if opts.owners is None else opts.owners
-    script = build_restore_script(sel, ex.local_rel, set(sent), owners)
-    sp = opts.staging / f".zesus-restore-fs{fs_id}.sh"
-    sp.write_text(script, encoding="utf-8", newline="\n")
-    res.script = str(sp)
-    if opts.dry_run:
-        say(f"dry run: restore script written to {sp} (not executed)")
-        return res
-    sh = "sudo -n sh -s" if opts.sudo else "sh -s"
-    if host:
-        cmd = tools.cmd(["ssh", *opts.ssh_args, host, f"cd {shlex.quote(dpath)} && {sh}"])
-    else:
-        cmd = tools.cmd(["sh", "-c", f"cd {shlex.quote(tools.path(dpath))} && {sh}"])
-    say("restoring original names, symlinks, owners, modes and times on the destination")
-    p = subprocess.run(cmd, input=script.encode("utf-8"), capture_output=True)
-    out, errtxt = p.stdout.decode("utf-8", "replace"), p.stderr.decode("utf-8", "replace")
-    if p.returncode != 0:
-        res.errors.append(f"restore script failed ({p.returncode}): {errtxt.strip()[-2000:]}")
-    m = re.search(r"ZESUS-RESTORED (\d+)", out)
-    res.restored = int(m.group(1)) if m else 0
-    res.errors += [ln for ln in errtxt.splitlines()[:20] if ln.strip()]
-    say(f"restored metadata on {res.restored} entries")
-    return res
+
+def _unstage(root: Path, batch: list, local_rel: dict) -> int:
+    """Delete the staged copies of a batch's files (after rsync succeeded). Only files this
+    tool staged under *root* are removed; directories are kept for later batches."""
+    freed = 0
+    for r in batch:
+        if r["type"] != "file":
+            continue
+        p = root / local_rel[r["path"]]
+        for q in (p, Path(str(p) + ".gaps.json")):
+            try:
+                freed += q.stat().st_size
+                q.unlink()
+            except FileNotFoundError:
+                pass
+    return freed
 
 
 def _run_rsync(cmd: list[str], say: Callable[[str], None]) -> tuple[list[str], str | None]:
