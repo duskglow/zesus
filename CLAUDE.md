@@ -4,6 +4,10 @@ Guidance for Claude Code (and humans) working on **Zesus**, *ZFS Emergency Stora
 Support*. Zesus is a forensic scanner and extractor that recovers destroyed ZFS volumes and
 datasets, even after they have left the uberblock ring.
 
+**Doing a recovery rather than developing Zesus?** Follow the operator skill in
+`.claude/skills/zfs-recovery/SKILL.md`. It covers the workflow, the rules of engagement,
+reporting to the owner, and environment pitfalls.
+
 ## Non-negotiable rules
 
 1. **Never write to the evidence.**
@@ -126,6 +130,20 @@ Open items, roughly by value:
 4. More filesystem plugins: XFS and NTFS inventory (identification exists already).
 5. Verification of zvol **snapshots** as their own volumes.
 6. Encrypted datasets (with a user-supplied key).
+
+Before the next release, make the recovery workflow commands rather than one-off
+scripts, and update the skill to use them:
+* `zesus losses MAP`: the lost/partial files with bytes lost, lost blocks, and whether a
+  missing member could help (see the skill, step 3). The same data should appear in the
+  web UI.
+* A carve-worthiness check (in `losses`, or its own command). Compare each volume's ring
+  root birth txg with its destroy txg, and the lost blocks' birth txgs with any other
+  generation. Answer "could carving recover more?" with the numbers.
+* `zesus send --verify`: hash the copies on the destination and compare them with the
+  staging manifest (what `C:\zfr-work\verify_seika.py` did by hand). Also record hashes
+  for staged copies that are reused, which now have none.
+* `zesus recheck MAP IMAGES...`: re-read only the lost blocks with a new member set (a
+  late-arriving disk), and update the map and file statuses when blocks come back.
 
 Before the next release (web UI):
 * Serve the page the backend was started with, and check page/API versions. A server
