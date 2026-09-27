@@ -164,6 +164,11 @@ def send(db: MapDB, pool: Pool, fs_id: int, patterns: list[str] | None, opts: Se
         # ---- 2. rsync
         sent, err = _rsync(tools, opts, host, dpath, root, fs_id, batch, local_rel, say)
         if err is not None:
+            # Record what did arrive, so a rerun still restores its names and metadata.
+            # rsync reports a file only once it is complete, so the list is safe to trust.
+            if sent and not opts.dry_run:
+                with open(ledger, "a", encoding="utf-8", errors="surrogateescape", newline="\n") as f:
+                    f.writelines(f"SENT {x}\n" for x in sent)
             res.errors.append(err)
             say(err)
             return res
