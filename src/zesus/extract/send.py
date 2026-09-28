@@ -162,7 +162,8 @@ def send(db: MapDB, pool: Pool, fs_id: int, patterns: list[str] | None, opts: Se
         res.staged += sum(1 for r in ex.records if r.kind == "file")
         ex.write_manifest({"purpose": "staging for zesus send"})
         # ---- 2. rsync
-        sent, err = _rsync(tools, opts, host, dpath, root, fs_id, batch, local_rel, say)
+        sent, err = _rsync(tools, opts, host, dpath, root, fs_id, batch, local_rel, say,
+                           symlinks=[r["path"] for r in sel if r["type"] == "symlink"])
         if err is not None:
             # Record what did arrive, so a rerun still restores its names and metadata.
             # rsync reports a file only once it is complete, so the list is safe to trust.
@@ -254,9 +255,11 @@ def _batches(db: MapDB, sel: list, local_rel: dict, done: set[str], batch_bytes:
 
 
 def _rsync(tools, opts, host, dpath, root: Path, fs_id: int, batch: list, local_rel: dict,
-           say) -> tuple[list[str], str | None]:
-    stubs = [local_rel[r["path"]].as_posix() + ".symlink" for r in batch
-             if r["type"] == "symlink" and sys.platform == "win32"]
+           say, symlinks: list[str] | None = None) -> tuple[list[str], str | None]:
+    # Windows symlink stubs stay local. Exclude the stubs of the *whole* selection: stubs
+    # staged in an earlier batch are still in the staging tree during later batches.
+    links = symlinks if symlinks is not None else [r["path"] for r in batch if r["type"] == "symlink"]
+    stubs = [local_rel[p].as_posix() + ".symlink" for p in links] if sys.platform == "win32" else []
     excludes = opts.staging / f".zesus-send-excludes-fs{fs_id}.txt"
     excludes.write_text("\n".join(["*.gaps.json", "*.zesus-writing", "/manifest.json", *[f"/{s}" for s in stubs]]) + "\n",
                         encoding="utf-8", newline="\n")
@@ -288,10 +291,11 @@ def _unstage(root: Path, batch: list, local_rel: dict) -> int:
     tool staged under *root* are removed; directories are kept for later batches."""
     freed = 0
     for r in batch:
-        if r["type"] != "file":
+        if r["type"] not in ("file", "symlink"):
             continue
         p = root / local_rel[r["path"]]
-        for q in (p, Path(str(p) + ".gaps.json")):
+        cands = (p, Path(str(p) + ".gaps.json")) if r["type"] == "file" else (Path(str(p) + ".symlink"),)
+        for q in cands:
             try:
                 freed += q.stat().st_size
                 q.unlink()
