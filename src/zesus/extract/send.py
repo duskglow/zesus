@@ -62,6 +62,8 @@ class SendOptions:
     owners: bool | None = None                  # chown; default: only with sudo
     ssh_command: str = "ssh"                    # e.g. Windows' ssh.exe, to use its keys from WSL
     batch_bytes: int = 0                        # >0: stage, send and delete this much at a time
+    verify: bool = False                        # afterwards, hash the copies on the destination
+    verify_only: bool = False                   # only verify an earlier send
 
 
 @dataclass
@@ -74,6 +76,11 @@ class SendResult:
     script: str | None = None
     errors: list[str] = field(default_factory=list)
     dry_run: bool = False
+    verified: int | None = None                 # identical on the destination (None: not checked)
+    verify_missing: list[str] = field(default_factory=list)
+    verify_different: list[str] = field(default_factory=list)
+    verify_unhashed: int = 0                    # sent, but no hash was recorded for them
+    verify_report: str | None = None
 
 
 # ---------------------------------------------------------------------- tooling
@@ -121,8 +128,19 @@ def parse_dest(dest: str) -> tuple[str | None, str]:
 
 def send(db: MapDB, pool: Pool, fs_id: int, patterns: list[str] | None, opts: SendOptions,
          progress: Callable[[str], None] | None = None) -> SendResult:
-    res = SendResult(dry_run=opts.dry_run)
     say = progress or (lambda m: log.info("%s", m))
+    if opts.verify_only:
+        res = SendResult()
+    else:
+        res = _send(db, pool, fs_id, patterns, opts, say)
+    if (opts.verify or opts.verify_only) and not opts.dry_run and not res.errors:
+        verify_destination(db, fs_id, patterns, opts, res, say)
+    return res
+
+
+def _send(db: MapDB, pool: Pool, fs_id: int, patterns: list[str] | None, opts: SendOptions,
+          say: Callable[[str], None]) -> SendResult:
+    res = SendResult(dry_run=opts.dry_run)
     tools = Tools()
     host, dpath = parse_dest(opts.dest)
     fs = db.execute("SELECT * FROM filesystems WHERE id=?", (fs_id,)).fetchone()
@@ -389,3 +407,88 @@ def build_restore_script(entries, local_rel: dict[str, Path], sent: set[str], ow
         out.append("  n=$((n+1)); fi")
     out.append('echo "ZESUS-RESTORED $n"')
     return "\n".join(out) + "\n"
+
+
+# ---------------------------------------------------------------------- verification
+
+def verify_destination(db: MapDB, fs_id: int, patterns: list[str] | None, opts: SendOptions,
+                       res: SendResult, say: Callable[[str], None]) -> None:
+    """Hash every sent file *on the destination* and compare it with the SHA-256 recorded
+    when zesus extracted and verified it (the staging manifest). Only hashes cross the
+    network. Fills res.verified / verify_missing / verify_different, and writes a report
+    next to the staging area."""
+    import hashlib
+    import json
+    statuses = {"full", "partial"} if opts.include_partial else {"full"}
+    files = [r["path"] for r in select_entries(db, fs_id, patterns, None)
+             if r["type"] == "file" and r["status"] in statuses]
+    man = opts.staging / "manifest.json"
+    recorded: dict[str, str] = {}
+    if man.exists():
+        for o in json.loads(man.read_text(encoding="utf-8")).get("outputs", []):
+            if o.get("kind") == "file" and o.get("sha256"):
+                recorded[o["source"]] = o["sha256"]
+    want = {p: recorded[p] for p in files if p in recorded}
+    res.verify_unhashed = len(files) - len(want)
+    say(f"verify: hashing {len(want)} files on the destination")
+    rels = [p.lstrip("/") for p in want]
+    host, dpath = parse_dest(opts.dest)
+    got: dict[str, str] = {}
+    if host is None:
+        root = Path(dpath)
+        for rel in rels:
+            q = root / rel
+            if q.is_file():
+                h = hashlib.sha256()
+                with open(q, "rb") as f:
+                    for b in iter(lambda: f.read(8 << 20), b""):
+                        h.update(b)
+                got[rel] = h.hexdigest()
+    else:
+        got = _remote_hashes(opts, host, dpath, rels)
+    res.verify_missing = sorted("/" + r for r in rels if r not in got)
+    res.verify_different = sorted("/" + r for r in rels if r in got and got[r] != want["/" + r])
+    res.verified = len(rels) - len(res.verify_missing) - len(res.verify_different)
+    lines = [f"# Verification of {opts.dest}", "",
+             f"* files compared: {len(rels)}",
+             f"* identical (SHA-256 matches the verified extraction): **{res.verified}**",
+             f"* missing at the destination: **{len(res.verify_missing)}**",
+             f"* different at the destination: **{len(res.verify_different)}**",
+             f"* sent without a recorded hash (not checked): {res.verify_unhashed}", ""]
+    for title, xs in (("Missing", res.verify_missing), ("Different", res.verify_different)):
+        if xs:
+            lines += [f"## {title}", ""] + [f"* `{x}`" for x in xs[:1000]] + [""]
+    rp = opts.staging / f"verify-fs{fs_id}.md"
+    rp.write_text("\n".join(lines), encoding="utf-8", newline="\n")
+    res.verify_report = str(rp)
+    if res.verify_missing or res.verify_different:
+        res.errors.append(f"verification: {len(res.verify_missing)} missing, {len(res.verify_different)} "
+                          f"different (see {rp})")
+    say(f"verify: {res.verified} identical, {len(res.verify_missing)} missing, "
+        f"{len(res.verify_different)} different")
+
+
+def _remote_hashes(opts: SendOptions, host: str, dpath: str, rels: list[str]) -> dict[str, str]:
+    """sha256sum on the destination, fed a NUL-separated list; nothing else is transferred."""
+    tools = Tools()
+    lst = opts.staging / ".zesus-verify-list.bin"
+    out = opts.staging / ".zesus-verify-hashes.bin"
+    lst.write_bytes(b"\0".join(r.encode("utf-8", "surrogateescape") for r in rels) + b"\0")
+    remote = f"cd {shlex.quote(dpath)} && xargs -0 sha256sum -z --"
+    win_ssh = _windows_exe(opts.ssh_command) if tools.mode == "wsl" else None
+    if win_ssh or tools.mode == "native":
+        cmd = [win_ssh or opts.ssh_command, *opts.ssh_args, host, remote]
+        with open(lst, "rb") as fi, open(out, "wb") as fo:
+            subprocess.run(cmd, stdin=fi, stdout=fo, stderr=subprocess.DEVNULL)
+    else:
+        ssh = " ".join([shlex.quote(opts.ssh_command), *map(shlex.quote, opts.ssh_args), shlex.quote(host),
+                        shlex.quote(remote)])
+        subprocess.run(tools.cmd(["sh", "-c", f"{ssh} < {shlex.quote(tools.path(lst))} "
+                                              f"> {shlex.quote(tools.path(out))}"]),
+                       stderr=subprocess.DEVNULL)
+    got: dict[str, str] = {}
+    for rec in out.read_bytes().split(b"\0"):
+        h, _, name = rec.partition(b"  ")
+        if name:
+            got[name.decode("utf-8", "surrogateescape")] = h.decode()
+    return got

@@ -416,8 +416,16 @@ class Extractor:
 
     def _already_there(self, r, target: Path) -> bool:
         if self.opts.skip_existing and target.is_file() and target.stat().st_size == (r["size"] or 0):
-            self.records.append(OutputRecord(kind="file", path=str(target), source=r["path"], size=r["size"] or 0,
-                                             status=r["status"] or "full", extra={"skipped_existing": True}))
+            # complete by construction: outputs are only renamed into place once written
+            rec = OutputRecord(kind="file", path=str(target), source=r["path"], size=r["size"] or 0,
+                               status=r["status"] or "full", extra={"skipped_existing": True})
+            if self.opts.hash_outputs:
+                h = hashlib.sha256()
+                with open(target, "rb") as f:
+                    for b in iter(lambda: f.read(8 << 20), b""):
+                        h.update(b)
+                rec.sha256 = h.hexdigest()
+            self.records.append(rec)
             return True
         return False
 

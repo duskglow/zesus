@@ -72,6 +72,11 @@ def add_extract_parser(sub) -> None:
     sd.add_argument("--batch", default="0", metavar="SIZE",
                     help="stage, send and delete this much at a time (e.g. 50G), for selections larger "
                          "than the local disk; resumable")
+    sd.add_argument("--verify", action="store_true",
+                    help="afterwards, hash every sent file on the destination and compare it with the hash "
+                         "recorded when it was extracted and verified (only hashes cross the network)")
+    sd.add_argument("--verify-only", action="store_true",
+                    help="only run that check, for an earlier send with the same --staging")
     sd.add_argument("--sudo", action="store_true",
                     help="run rsync and the restore script as root on the destination (sudo -n); restores owners")
     sd.add_argument("--overwrite", action="store_true", help="replace files that already exist at the destination")
@@ -220,12 +225,17 @@ def cmd_send(args: argparse.Namespace) -> int:
     from .main import _size
     opts = SendOptions(dest=args.to, staging=staging, ssh_args=shlex.split(args.ssh), overwrite=args.overwrite,
                        ssh_command=args.ssh_command, batch_bytes=_size(args.batch),
+                       verify=args.verify, verify_only=args.verify_only,
                        include_partial=args.include_partial, dry_run=args.dry_run, sudo=args.sudo,
                        metadata=not args.no_metadata)
     res = send(db, pool, args.fs, args.path or None, opts)
     log.info("%s: staged %d, sent %d, restored metadata on %d; held back %d partial, %d unrecoverable%s",
              "DRY RUN" if res.dry_run else "done", res.staged, res.sent, res.restored, res.held_back_partial,
              res.unrecoverable, f"; restore script: {res.script}" if res.script else "")
+    if res.verified is not None:
+        log.info("verification: %d identical, %d missing, %d different, %d without a recorded hash; report: %s",
+                 res.verified, len(res.verify_missing), len(res.verify_different), res.verify_unhashed,
+                 res.verify_report)
     for e in res.errors:
         log.error("%s", e)
     src.verify_unchanged()
