@@ -129,3 +129,14 @@ def test_verify_destination_compares_recorded_hashes(tmp_path):
     assert res.verified == 1
     assert res.verify_missing == ["/a/gone.txt"] and res.verify_different == ["/a/bad.txt"]
     assert res.errors and (staging / "verify-fs1.md").exists()
+
+
+def test_script_never_names_paths_outside_the_destination():
+    bad = [row("/", "dir", 0o40755), row("/..", "dir", 0o40755),
+           row("/../../etc/x", "symlink", 0o120777, target="/tmp/y"),
+           row("/a/./b", "file", 0o100644), row("/ok", "file", 0o100644)]
+    namer = LocalNamer(case_insensitive=False)
+    local = {r["path"]: namer.local(r["path"]) for r in bad}
+    script = build_restore_script(bad, local, {"ok"}, owners=True)
+    assert ".." not in script and "etc" not in script and "a/./b" not in script
+    assert "chmod 644 ok" in script

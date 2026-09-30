@@ -203,7 +203,7 @@ function checkBuild(b) {
 const api = async (p, opt) => { const r = await fetch(p, opt); checkBuild(r.headers.get("X-Zesus-Build"));
   if (!r.ok) { let t = await r.text();
   try { t = JSON.parse(t).detail || t; } catch (e) {} throw new Error(t); } return r.json(); };
-const post = (p, body) => api(p, {method: "POST", headers: {"content-type": "application/json"}, body: JSON.stringify(body)});
+const post = (p, body) => api(p, {method: "POST", headers: {"content-type": "application/json", "x-zesus-request": "1"}, body: JSON.stringify(body)});
 const gib = n => n == null ? "?" : n >= 2**40 ? (n/2**40).toFixed(2)+" TiB" : n >= 2**30 ? (n/2**30).toFixed(1)+" GiB" : n >= 2**20 ? (n/2**20).toFixed(1)+" MiB" : n >= 1024 ? (n/1024).toFixed(1)+" KiB" : n+" B";
 const ts = t => t ? new Date(t*1000).toLocaleString() : "?";
 const pct = (a, n) => n ? (100*a/n).toFixed(2)+"%" : "–";

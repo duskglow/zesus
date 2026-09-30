@@ -26,9 +26,22 @@ STATUS_ORDER = ["ok", "ok_stale", "embedded", "hole", "discarded", "unknown", "c
                 "no_metadata", "unreadable", "decompress_fail"]
 
 
-def create_app(map_path: str, source: str | list[str] | None = None):
+def allowed_hosts(host: str = "127.0.0.1", port: int | None = None) -> set[str]:
+    """Host header values this server answers to: loopback names, plus the address it
+    was explicitly bound to. Anything else is refused (DNS rebinding)."""
+    names = {"127.0.0.1", "localhost", "[::1]", "::1"}
+    if host not in ("0.0.0.0", "::", "", None):
+        names.add(f"[{host}]" if ":" in host and not host.startswith("[") else host)
+    out = set(names)
+    if port:
+        out |= {f"{n}:{port}" for n in names}
+    return out
+
+
+def create_app(map_path: str, source: str | list[str] | None = None, hosts: set[str] | None = None):
+    """*hosts*: accepted Host headers (see allowed_hosts). Default: loopback, any port."""
     from fastapi import FastAPI, HTTPException
-    from fastapi.responses import HTMLResponse
+    from fastapi.responses import HTMLResponse, JSONResponse
 
     from .. import __version__
     from ..jobs import JobStore
@@ -43,10 +56,36 @@ def create_app(map_path: str, source: str | list[str] | None = None):
     PAGE = resources.files("zesus.web").joinpath("index.html").read_text(encoding="utf-8") \
         .replace("__ZESUS_BUILD__", BUILD)
 
+    loopback = {"127.0.0.1", "localhost", "[::1]", "::1"}
+
+    def host_ok(value: str | None) -> bool:
+        if not value:
+            return False
+        if hosts is not None:
+            return value in hosts
+        name = value.rsplit(":", 1)[0] if not value.startswith("[") else value.split("]")[0] + "]"
+        return name in loopback
+
     @app.middleware("http")
-    async def build_header(request, call_next):
+    async def guard_requests(request, call_next):
+        # Only this machine's own pages may talk to the API, since it can read evidence and
+        # send recovered files elsewhere:
+        # * the Host header must name this server (defeats DNS rebinding);
+        # * a request that changes something must come from our own page: no foreign
+        #   Origin, and a header a cross-site page cannot send without a CORS preflight
+        #   (which this server never grants).
+        if not host_ok(request.headers.get("host")):
+            return JSONResponse({"detail": "unexpected Host header"}, status_code=403)
+        if request.method not in ("GET", "HEAD", "OPTIONS"):
+            origin = request.headers.get("origin")
+            if origin and not host_ok(origin.split("://", 1)[-1]):
+                return JSONResponse({"detail": "cross-origin request refused"}, status_code=403)
+            if request.headers.get("x-zesus-request") != "1":
+                return JSONResponse({"detail": "missing X-Zesus-Request header"}, status_code=403)
         response = await call_next(request)
         response.headers["X-Zesus-Build"] = BUILD
+        response.headers["X-Content-Type-Options"] = "nosniff"
+        response.headers["X-Frame-Options"] = "DENY"
         return response
 
     def evidence_paths() -> list[str]:
@@ -342,7 +381,9 @@ def create_app(map_path: str, source: str | list[str] | None = None):
             raise HTTPException(400, "output directory required")
         if (problem := check_out(out)):
             raise HTTPException(400, problem)
-        argv = ["extract", map_path, *need_evidence(), "-o", out, "--fill", req.get("fill", "zero")]
+        # every value from the request as --opt=value: a value starting with "-" is then
+        # never taken for an option
+        argv = ["extract", map_path, *need_evidence(), f"--out={out}", f"--fill={req.get('fill', 'zero')}"]
         if req.get("force"):
             argv.append("--force")
         if not req.get("hash", True):
@@ -357,9 +398,9 @@ def create_app(map_path: str, source: str | list[str] | None = None):
             argv += ["--partition", f"{pr[0]['volume_id']}:{pr[0]['idx']}"]
         elif kind == "files":
             argv += ["--fs", str(int(req["fs_id"])),
-                     "--status", ",".join(req.get("statuses") or ["full", "partial", "none"])]
+                     f"--status={','.join(req.get('statuses') or ['full', 'partial', 'none'])}"]
             for pth in req.get("paths") or []:
-                argv += ["--path", pth]
+                argv.append(f"--path={pth}")
         else:
             raise HTTPException(400, f"unknown kind {kind!r}")
         return start("extract", req, argv)
@@ -399,14 +440,14 @@ def create_app(map_path: str, source: str | list[str] | None = None):
         if not req.get("dest") or not req.get("fs_id"):
             raise HTTPException(400, "destination and filesystem are required")
         staging = req.get("staging") or str(Path(map_path).resolve().parent / "staging")
-        argv = ["send", map_path, *need_evidence(), "--fs", str(int(req["fs_id"])), "--to", req["dest"],
-                "--staging", staging]
+        argv = ["send", map_path, *need_evidence(), "--fs", str(int(req["fs_id"])), f"--to={req['dest']}",
+                f"--staging={staging}"]
         for pth in req.get("paths") or []:
-            argv += ["--path", pth]
+            argv.append(f"--path={pth}")
         if req.get("ssh"):
-            argv += ["--ssh", req["ssh"]]
+            argv.append(f"--ssh={req['ssh']}")
         if req.get("batch"):
-            argv += ["--batch", str(req["batch"])]
+            argv.append(f"--batch={req['batch']}")
         for flag, opt in (("overwrite", "--overwrite"), ("include_partial", "--include-partial"),
                           ("dry_run", "--dry-run"), ("sudo", "--sudo"), ("verify", "--verify")):
             if req.get(flag):
@@ -430,8 +471,10 @@ def free_space(path: str) -> int | None:
 def serve(map_path: str, source: str | list[str] | None, host: str = "127.0.0.1", port: int = 8765) -> None:
     import uvicorn
     if host not in ("127.0.0.1", "localhost", "::1"):
-        log.warning("binding to %s exposes evidence metadata on the network", host)
+        log.warning("binding to %s: anyone who can reach it can browse the map, run jobs and send "
+                    "recovered files anywhere. There is no authentication; prefer an ssh tunnel", host)
     log.info("web UI at http://%s:%d/", host, port)
-    uvicorn.run(create_app(map_path, source), host=host, port=port, log_level="warning")
+    uvicorn.run(create_app(map_path, source, allowed_hosts(host, port)), host=host, port=port,
+                log_level="warning")
 
 

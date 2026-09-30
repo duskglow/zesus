@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 import sys
 import threading
@@ -73,6 +74,8 @@ class JobStore:
         return [jid for _t, jid in sorted(recs)]
 
     def get(self, jid: str, progress: dict | None = None) -> dict | None:
+        if not _ID.fullmatch(jid):
+            return None
         f = self.dir / f"{jid}.json"
         try:
             rec = json.loads(f.read_text(encoding="utf-8"))
@@ -102,6 +105,8 @@ class JobStore:
             return None
 
     def tail(self, jid: str, n: int) -> list[str]:
+        if not _ID.fullmatch(jid):
+            return []
         try:
             with open(self.dir / f"{jid}.log", "rb") as f:
                 f.seek(0, 2)
@@ -114,11 +119,14 @@ class JobStore:
 
     # ------------------------------------------------------------------ control
     def cancel(self, jid: str) -> bool:
-        if not (self.dir / f"{jid}.json").exists():
+        if not _ID.fullmatch(jid) or not (self.dir / f"{jid}.json").exists():
             return False
         (self.dir / f"{jid}.cancel").write_text(str(time.time()), encoding="utf-8")
         return True
 
+
+# job ids come from URLs; only ids this store made may name a file
+_ID = re.compile(r"[0-9a-f]{8}")
 
 def _spawn(cmd: list[str], out, env: dict) -> subprocess.Popen:
     """Start *cmd* detached from this process's console, process group and (on Windows)

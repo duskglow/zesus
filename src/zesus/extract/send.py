@@ -42,6 +42,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path, PureWindowsPath
 
+from ..io import guard
 from ..map.db import MapDB
 from ..zfs.pool import Pool
 from .engine import Extractor, LocalNamer, Options, select_entries
@@ -373,6 +374,10 @@ def build_restore_script(entries, local_rel: dict[str, Path], sent: set[str], ow
         if r["path"].strip("/") == "":
             continue
         orig = r["path"].strip("/")
+        if any(c in ("", ".", "..") for c in orig.split("/")):
+            # a damaged or crafted name must never lead the script outside the destination;
+            # such an entry keeps its escaped local name
+            continue
         loc = local_rel[r["path"]].as_posix()
         created = (loc + "/" in sent) if r["type"] == "dir" else (loc in sent)
         rows.append((orig, loc, r, created))
@@ -471,6 +476,7 @@ def verify_destination(db: MapDB, fs_id: int, patterns: list[str] | None, opts: 
         if xs:
             lines += [f"## {title}", ""] + [f"* `{x}`" for x in xs[:1000]] + [""]
     rp = opts.staging / f"verify-fs{fs_id}.md"
+    guard.assert_not_protected([rp])
     rp.write_text("\n".join(lines), encoding="utf-8", newline="\n")
     res.verify_report = str(rp)
     if res.verify_missing or res.verify_different:
@@ -485,6 +491,7 @@ def _remote_hashes(opts: SendOptions, host: str, dpath: str, rels: list[str]) ->
     tools = Tools()
     lst = opts.staging / ".zesus-verify-list.bin"
     out = opts.staging / ".zesus-verify-hashes.bin"
+    guard.assert_not_protected([lst, out])
     lst.write_bytes(b"\0".join(r.encode("utf-8", "surrogateescape") for r in rels) + b"\0")
     remote = f"cd {shlex.quote(dpath)} && xargs -0 sha256sum -z --"
     win_ssh = _windows_exe(opts.ssh_command) if tools.mode == "wsl" else None

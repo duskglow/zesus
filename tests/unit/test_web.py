@@ -13,7 +13,12 @@ from fastapi.testclient import TestClient  # noqa: E402
 
 from zesus.extract.engine import estimate_files  # noqa: E402
 from zesus.map.db import MapDB  # noqa: E402
-from zesus.web.app import create_app  # noqa: E402
+from zesus.web.app import allowed_hosts, create_app  # noqa: E402
+
+
+def TC(app, **kw):
+    """A client as the page itself: a loopback Host, and the header it sends with changes."""
+    return TestClient(app, base_url="http://127.0.0.1:8765", headers={"x-zesus-request": "1"}, **kw)
 
 BS = 16384
 
@@ -43,7 +48,7 @@ def mapfile(tmp_path):
 
 @pytest.fixture
 def client(mapfile):
-    return TestClient(create_app(str(mapfile), None))
+    return TC(create_app(str(mapfile), None))
 
 
 def test_overview_and_listing(client):
@@ -96,13 +101,13 @@ def wait_job(c, jid, timeout=60):
 def test_scan_job_runs_as_its_own_process_and_survives_a_server_restart(tmp_path, mapfile):
     img = tmp_path / "blank.img"
     img.write_bytes(b"\0" * (16 << 20))                # no pool in it: phases finish quickly
-    c = TestClient(create_app(str(mapfile), [str(img)]))
+    c = TC(create_app(str(mapfile), [str(img)]))
     jid = c.post("/api/scan", json={"phases": ["history", "datasets"]}).json()["id"]
     j = wait_job(c, jid)
     assert j["state"] == "done", j
     assert j["argv"][0] == "scan" and j["pid"]
     # a new server (a restart, or an upgrade) still knows the job and its result
-    c2 = TestClient(create_app(str(mapfile), [str(img)]))
+    c2 = TC(create_app(str(mapfile), [str(img)]))
     j2 = next(x for x in c2.get("/api/jobs").json()["jobs"] if x["id"] == jid)
     assert j2["state"] == "done" and j2["message"] == j["message"]
     assert c2.post(f"/api/jobs/{jid}/cancel").status_code == 200   # cancelling a finished job is harmless
@@ -110,19 +115,19 @@ def test_scan_job_runs_as_its_own_process_and_survives_a_server_restart(tmp_path
 
 
 def test_responses_carry_the_build_and_the_page_is_fixed_at_start(mapfile):
-    c = TestClient(create_app(str(mapfile), None))
+    c = TC(create_app(str(mapfile), None))
     r = c.get("/api/overview")
     build = r.headers["X-Zesus-Build"]
     page = c.get("/").text
     assert f'const BUILD = "{build}"' in page and "__ZESUS_BUILD__" not in page
     assert c.get("/api/build").json()["build"] == build
-    other = TestClient(create_app(str(mapfile), None)).get("/api/build").json()["build"]
+    other = TC(create_app(str(mapfile), None)).get("/api/build").json()["build"]
     assert other != build                                  # a restarted server is a different build
 
 
 def test_event_stream_pushes_the_job_list(mapfile):
     import json
-    c = TestClient(create_app(str(mapfile), None))
+    c = TC(create_app(str(mapfile), None))
     with c.stream("GET", "/api/stream?once=true") as r:
         events = []
         for line in r.iter_lines():
@@ -132,3 +137,31 @@ def test_event_stream_pushes_the_job_list(mapfile):
                 data = json.loads(line[5:])
                 break
     assert events[:2] == ["hello", "jobs"] and data["jobs"] == [] and data["build"]
+
+
+def test_refuses_foreign_hosts_origins_and_bare_posts(mapfile):
+    """DNS rebinding and cross-site requests must not reach the API: it can read the
+    evidence and send recovered files anywhere."""
+    app = create_app(str(mapfile), None, allowed_hosts("127.0.0.1", 8765))
+    c = TestClient(app, base_url="http://127.0.0.1:8765")
+    assert c.get("/api/overview").status_code == 200
+    assert c.get("/api/overview", headers={"host": "evil.example:8765"}).status_code == 403
+    assert c.get("/api/overview", headers={"host": "127.0.0.1:9999"}).status_code == 403
+    body = {"kind": "files", "fs_id": 1, "paths": ["/a"]}
+    assert c.post("/api/estimate", json=body).status_code == 403                  # no page header
+    ok = {"x-zesus-request": "1"}
+    assert c.post("/api/estimate", json=body, headers=ok).status_code == 200
+    assert c.post("/api/estimate", json=body, headers={**ok, "origin": "https://evil.example"}).status_code == 403
+    assert c.post("/api/estimate", json=body, headers={**ok, "origin": "http://127.0.0.1:8765"}).status_code == 200
+    assert c.post("/api/send", json={"fs_id": 1, "dest": "x@evil:/"},
+                  headers={"host": "evil.example", **ok}).status_code == 403
+
+
+def test_job_ids_cannot_name_other_files(tmp_path):
+    from zesus.jobs import JobStore
+    js = JobStore(tmp_path / "m.sqlite")
+    js.dir.mkdir()
+    (tmp_path / "x.json").write_text("{}", encoding="utf-8")
+    for jid in (r"..\x","../x", "ABCDEF12", "abc"):
+        assert js.cancel(jid) is False and js.get(jid) is None and js.tail(jid, 5) == []
+    assert not (tmp_path / "x.cancel").exists()
