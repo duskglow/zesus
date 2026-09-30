@@ -18,6 +18,17 @@
 #     to find them again.
 set -eu
 HERE=$(cd "$(dirname "$0")/.." && pwd)
+# Pool labels record the creating host's name and hostid. The hostid is fixed here. The
+# hostname is taken by the kernel from the system itself, so it can only be neutralized by
+# renaming the machine for the duration of the build: set ZFX_HOSTNAME to opt in (the old
+# name is restored on exit).
+OLD_HOST=$(hostname)
+if [ -n "${ZFX_HOSTNAME:-}" ] && [ "$ZFX_HOSTNAME" != "$OLD_HOST" ]; then
+    hostname "$ZFX_HOSTNAME"
+fi
+HOSTID_PARAM=/sys/module/spl/parameters/spl_hostid
+OLD_HOSTID=$(cat "$HOSTID_PARAM" 2>/dev/null || echo 0)
+[ -w "$HOSTID_PARAM" ] && echo 1514492757 > "$HOSTID_PARAM"      # 0x5a455355, "ZESU"
 OUT="$HERE/tests/fixtures/zfs"
 TMP=$(mktemp -d /tmp/zfx.XXXXXX)
 SIZE=${ZFX_SIZE:-96M}          # per member (the ZFS minimum is 64M, after its partitioning)
@@ -27,6 +38,8 @@ cleanup() {
     for p in $POOLS; do zpool destroy -f "$p" 2>/dev/null || true; done
     for l in $LOOPS; do losetup -d "$l" 2>/dev/null || true; done
     rm -rf "$TMP"
+    [ -w "$HOSTID_PARAM" ] && echo "$OLD_HOSTID" > "$HOSTID_PARAM" || true
+    [ "$(hostname)" != "$OLD_HOST" ] && hostname "$OLD_HOST" || true
 }
 trap cleanup EXIT
 command -v zpool >/dev/null || { echo "zpool not found: install zfsutils-linux" >&2; exit 1; }
