@@ -11,10 +11,35 @@
   `--io-depth`. Results are identical to a serial run.
 * Progress with rate and ETA for scan, verify and extract. Cancelling keeps scans
   resumable and labels cancelled outputs.
-* Web UI: run scans, live progress with cancel, multi-select extraction, pre-extraction
-  estimates, member health.
-* Fix: on Windows, large output images were created by writing zeros (Python's
-  `truncate()`). They are now created sparse, instantly.
+* Recovery commands:
+  * `zesus losses`: the affected files, their zero-filled byte ranges, whether carving
+    could recover more (and why), and, with `--evidence`, whether a missing disk could
+    help.
+  * `zesus recheck`: retries only the lost blocks with new evidence, such as a member disk
+    that arrived after the scan.
+  * `zesus send --verify` / `--verify-only`: hashes every sent file on the destination and
+    compares it with the hash recorded at extraction.
+  * `zesus send --batch SIZE`: for selections larger than the local disk, it stages,
+    sends and deletes in batches, and resumes from a ledger. `--ssh-command` sets the ssh
+    program.
+* Web UI:
+  * run scans; live progress (pushed as server-sent events) with cancel;
+  * multi-select extraction; pre-extraction estimates;
+  * member health; the affected-files list.
+  * Jobs are separate processes that survive a server restart or upgrade, and the page
+    reloads itself when the server changes.
+* Faster extraction of large files, through the same windowed path as volume images.
+* The operator skill (`.claude/skills/zfs-recovery/SKILL.md`) lets Claude Code run a
+  recovery end to end on the owner's behalf.
+* Fixes:
+  * On Windows, large output images were created by writing zeros (Python's `truncate()`).
+    They are now created sparse, instantly.
+  * An interrupted extraction or send could leave a full-size but incomplete file, and a
+    resumed run would keep it. Outputs are now renamed into place only when complete, and
+    rsync keeps partial transfers aside.
+  * The part of a zvol after its last written block was reported as lost; it is now
+    treated as never written.
+  * Reconstruction crashed on a single-level zvol tree (an empty zvol found by carving).
 
 ## 0.1.0 (unreleased)
 

@@ -158,6 +158,14 @@ zesus send case.sqlite disk.img --fs 1 --path /home/alice --to root@newserver:/ 
 * Windows needs rsync and ssh inside WSL (`sudo apt install rsync openssh-client`). Your ssh
   keys must be set up there too.
 * Staging needs local disk space for the files being sent. Choose where with `--staging`.
+  Not enough room? `--batch 50G` stages, sends and deletes 50 GB at a time. An
+  interrupted batched send resumes where it stopped.
+* Before you wipe the original disks, check the copy. `--verify` (or `--verify-only`
+  afterwards, with the same `--staging`) hashes every file *on the destination* and
+  compares it with the hash recorded when Zesus extracted it. Only the hashes cross the
+  network.
+* Your usual ssh isn't the one rsync uses (common on Windows, where rsync runs in WSL)?
+  Point `--ssh-command` at the right one.
 
 ---
 
@@ -177,6 +185,19 @@ Add `--snapshots` to the scan if you also want the contents of every snapshot in
 ---
 
 ## Recipe 4: "What exactly can and can't I get back?"
+
+The short answer, with the affected files and whether anything more could come back:
+
+```bash
+zesus losses case.sqlite                  # add --evidence to ask "would a missing disk help?"
+```
+
+It lists every unrecoverable and partial file, with the exact byte ranges that will be
+zeros. It then says whether carving could recover more, and why: for example "no: the
+ring still reaches the volume just before it was destroyed, so this is its final state".
+The same list is in the web UI, under Volumes.
+
+The long answer:
 
 ```bash
 zesus report case.sqlite -o case-report.md       # also writes case-report.csv (one row per file)
@@ -255,9 +276,15 @@ About strategies:
 * A mirror needs nothing special. Zesus reads whichever copy verifies, trying the copy
   with the fewest checksum failures first.
 
-Imaged the missing disk later? Run `zesus members` on the full set, then scan again with
-every image. Carving adds what the new disk shows; blocks already found are not
-duplicated.
+Imaged the missing disk later? You don't need to scan again. Retry just what was lost:
+
+```bash
+zesus recheck case.sqlite sda.img sdb.img sdc.img sdd.img     # every member, including the new one
+```
+
+With every member present, parity can also repair a block where one piece was damaged.
+Anything still lost after that was overwritten in more than one place, and the loss is
+final.
 
 Speed: members are read in parallel, one sequential stream per disk, so a 4-disk RAIDZ
 scans in about the time of one disk when the storage can deliver it. The defaults are

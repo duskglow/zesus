@@ -50,6 +50,8 @@ src/zesus/
   cli/         main (scan/info/report/web), extract_cmd (extract/ls), report, fullreport
   web/         FastAPI + single-file vanilla JS UI (localhost only): jobs with progress/cancel
   parallel.py  ordered pipelines, read-ahead, --workers/--io-depth · progress.py · combine.py (mirrors)
+  losses.py    affected files, zero-filled ranges, carve verdict · recheck.py (lost blocks, new evidence)
+  jobs.py      web UI jobs: detached zesus commands, records in <map>.jobs/ · evidence.py (open + check)
 dev/           imgtool.py (inspect an image), make_ext4_fixtures.sh
 tests/         unit (fixtures in tests/fixtures), integration (needs ZESUS_TEST_IMAGE)
 docs/          how-to-use.md (user recipes), architecture.md, map-format.md, writing-plugins.md
@@ -126,35 +128,11 @@ Open items, roughly by value:
 1. Carved-only reconstruction for destroyed ZFS **filesystem** datasets (the volume path in
    `phase_reconstruct` shows the approach: cluster carved `os_type=2` objsets and walk
    them with `ZplFilesystem`).
-2. Run `dev/make_zfs_fixtures.sh` (real OpenZFS mirror/RAIDZ1-3 pools) and commit the
-   fixtures, so RAIDZ2/3 are validated against OpenZFS in CI.
-3. dRAID and expanded RAIDZ (reported as unsupported). RAIDZ1/2/3 work: see below.
-4. More filesystem plugins: XFS and NTFS inventory (identification exists already).
-5. Verification of zvol **snapshots** as their own volumes.
-6. Encrypted datasets (with a user-supplied key).
+2. dRAID and expanded RAIDZ (reported as unsupported).
+3. More filesystem plugins: XFS and NTFS inventory (identification exists already).
+4. Verification of zvol **snapshots** as their own volumes.
+5. Encrypted datasets (with a user-supplied key).
+6. File extraction plans its reads per file. Planning across all selected files at once, in
+   physical order, would help most with many medium-sized files: extracting large extents
+   through the windowed path gained only about 15% cold.
 
-Before the next release, make the recovery workflow commands rather than one-off
-scripts, and update the skill to use them:
-* `zesus losses MAP`: the lost/partial files with bytes lost, lost blocks, and whether a
-  missing member could help (see the skill, step 3). The same data should appear in the
-  web UI.
-* A carve-worthiness check (in `losses`, or its own command). Compare each volume's ring
-  root birth txg with its destroy txg, and the lost blocks' birth txgs with any other
-  generation. Answer "could carving recover more?" with the numbers.
-* `zesus send --verify`: hash the copies on the destination and compare them with the
-  staging manifest (previously a hand-written script). Also record hashes
-  for staged copies that are reused, which now have none.
-* `zesus recheck MAP IMAGES...`: re-read only the lost blocks with a new member set (a
-  late-arriving disk), and update the map and file statuses when blocks come back.
-
-Before the next release (web UI):
-* Serve the page the backend was started with, and check page/API versions. A server
-  started before an upgrade served the new page to an old API, which gave a blank Jobs
-  page. On a mismatch, say "restart when idle" instead.
-* Run web jobs as separate processes that publish progress to the map (as CLI scans do),
-  and keep the job list in the map. A restart then neither kills nor forgets a job, and
-  the page can reload itself when the backend comes back.
-* Push job updates (server-sent events) instead of polling.
-* Faster file extraction: files are read one block at a time through LogicalVolume.
-  Batch each file's blocks, in physical order, through the same windowed path volume
-  extraction uses.

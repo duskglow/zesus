@@ -77,7 +77,9 @@ zesus extract case.sqlite /dev/sdb -o out/ --fs 1 --path '/home/*' # selected fi
 #     permissions, times and, with --sudo, owners)
 zesus send case.sqlite /dev/sdb --fs 1 --path /home --to root@server:/ --sudo --dry-run
 
-# 4. Write a recovery report: what was found, what is lost and why (Markdown + per-file CSV)
+# 4. What is lost, exactly, and could anything more bring it back?
+zesus losses case.sqlite
+#    Or the full recovery report: what was found, what is lost and why (Markdown + per-file CSV)
 zesus report case.sqlite -o case-report.md
 
 # Multi-disk pools: give one image per member disk, in any order
@@ -108,6 +110,25 @@ Keep the map and the outputs on a **different disk** from the evidence.
 
 New filesystems are plugins and need no change to core code. See
 [docs/writing-plugins.md](docs/writing-plugins.md) and `examples/plugin-template/`.
+
+## Let Claude do the recovery
+
+Zesus ships with a [Claude Code](https://claude.com/claude-code) skill,
+[`.claude/skills/zfs-recovery`](.claude/skills/zfs-recovery/SKILL.md), that turns Claude
+into the recovery operator. You point it at your disk images and make the decisions;
+Claude:
+* identifies the member disks;
+* scans the images;
+* reports in plain language what can and cannot be recovered;
+* copies the data where you say, and checks the copy by hash before telling you the
+  source can be released.
+
+The skill carries the rules Claude works under: the evidence is read-only, file contents
+stay private, and nothing leaves the machine without your say-so.
+
+Run Claude Code from a checkout of this repository, or copy the skill folder into
+`~/.claude/skills/`, and ask something like *"recover the destroyed zvol from these four
+disk images"*.
 
 ## Documentation
 

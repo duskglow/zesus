@@ -74,16 +74,21 @@ written blocks (not a loss) and the lost blocks, and translate that into sizes.
 
 ### 3. Turn losses into a list of files
 
-Report which *files* are affected, not blocks. Query `fs_entries` for `status IN
-('partial','none')` and give:
-* path;
-* size;
-* bytes lost;
-* how many lost blocks each file has;
-* whether a missing member could possibly help (see the architecture doc).
+Report which *files* are affected, not blocks:
 
-Save the list next to the map as Markdown. Group it the way the owner thinks about the
-data: "only old backups in one folder are affected" is the useful summary.
+```bash
+zesus losses case.sqlite --evidence -o losses.md      # --evidence: could a missing disk help?
+```
+
+It lists:
+* every unrecoverable and partial file, with its size and the bytes lost;
+* the exact zero-filled byte ranges of each partial file;
+* with `--evidence`, how many of its lost blocks have a piece on a member that is absent;
+* whether carving could recover more (step 4).
+
+Summarize it the way the owner thinks about the data: "only old backups in one folder
+are affected" is the useful summary. When the owner has a copy of the recovered files
+somewhere, leave the list there too, so they know which files to distrust.
 
 What damage means for each kind of file:
 * A partial model or database file loads but holds wrong values in the gap.
@@ -103,14 +108,21 @@ when it can plausibly add something:
   birth txgs), so no older copy can exist. Then the loss is final. Carving would not
   change it.
 
-Explain the reasoning to the owner in two or three sentences, with the numbers.
+`zesus losses` gives this verdict (no, yes, possibly, already done) with the numbers.
+Explain it to the owner in two or three sentences.
 
 ### 5. When a missing member arrives
 
-Run `zesus members` on the full set. Then re-read just the lost blocks with all members.
+Run `zesus members` on the full set. Then retry just the lost blocks with every member:
+
+```bash
+zesus recheck case.sqlite img1 img2 img3 img4
+```
+
 Parity can now repair single-column damage, and data on the new disk is read directly.
-If blocks are still lost with every member present, more than one column was overwritten
-and the loss is final. Say so plainly.
+Blocks that come back are marked recovered, and file statuses are rebuilt. If blocks are
+still lost with every member present, more than one column was overwritten and the loss
+is final. Say so plainly.
 
 ### 6. Get the data out
 
@@ -130,11 +142,16 @@ and the loss is final. Say so plainly.
 
 ### 7. Verify, then release the source
 
-Before the owner wipes or reuses the original disks or the images, check the copy. The
-staging manifest holds the SHA-256 of every file Zesus extracted and verified. Hash the
-copies *on the destination* and compare. Only the hashes cross the network. Report
-identical, missing and different counts. Only when everything matches should you tell
-the owner the source can be released.
+Before the owner wipes or reuses the original disks or the images, check the copy:
+
+```bash
+zesus send case.sqlite --fs ID --to user@host:/path --staging SCRATCH --verify-only
+```
+
+(or pass `--verify` to the send itself). Every sent file is hashed *on the destination*
+and compared with the SHA-256 Zesus recorded when it extracted and verified the file.
+Only the hashes cross the network. Report the identical, missing and different counts.
+Only when everything matches should you tell the owner the source can be released.
 
 ## Environment notes (learned the hard way)
 
@@ -151,14 +168,15 @@ the owner the source can be released.
   distro's filesystem). Use loop devices: see `dev/make_zfs_fixtures.sh`.
 * **Staging space:** ask what disks exist. A "scratch" drive the owner forgot about is
   common.
-* **Web UI:** jobs run inside the server process. Never restart it while a job runs.
-  A server started before an upgrade may show a blank page. The job data is still at
-  `/api/jobs`.
+* **Web UI:** jobs are separate processes (listed in `<map>.jobs/`). Restarting or
+  upgrading the server does not stop them, and an open page reloads itself when the
+  server changes.
 * **Network evidence:** throughput is set by the slowest link. The owner imaging another
   disk to the same share halves everything. Tell them; don't fight it.
 * **Long jobs:** run them in the background, watch with a filter that catches every
   failure signature (not just success), and report per milestone, not per log line.
-  File names can contain words like "ERROR". Match log levels, not bare words.
+  File names can contain words like "ERROR". Match log levels, not bare words. Never
+  wrap a long transfer in a `timeout`: killing it mid-way leaves work half-done.
 
 ## Reporting
 
