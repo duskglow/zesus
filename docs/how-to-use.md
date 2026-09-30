@@ -211,7 +211,7 @@ zesus members sda.img sdb.img sdc.img sdd.img
 ```
 
 ```
-pool tank (guid 1133...), newest txg 150122
+pool tank (guid 6012...), newest txg 48213
   vdev 0: raidz1 width 4, ashift 12: DEGRADED but recoverable: 1 of 4 members missing, rebuilt from parity (no redundancy left)
     child  0  present   sda.img   ...
     child  0  duplicate sdd.img   ...  (same member as sda.img: identical at 12 sampled regions)

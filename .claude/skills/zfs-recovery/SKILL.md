@@ -40,7 +40,7 @@ These are not negotiable, whatever the owner's urgency.
 
 Keep the map and every output on a different disk from the evidence. Pick a working
 directory with room for the map (roughly 0.1% of the pool size) and logs, such as
-`C:\zfr-work` or `~/recovery`. Scratch space for staging can be a separate large disk.
+`~/recovery` or `C:\recovery`. Scratch space for staging can be a separate large disk.
 
 ### 1. Identify the evidence
 
@@ -83,7 +83,7 @@ Report which *files* are affected, not blocks. Query `fs_entries` for `status IN
 * whether a missing member could possibly help (see the architecture doc).
 
 Save the list next to the map as Markdown. Group it the way the owner thinks about the
-data: "only training checkpoints are affected" is the useful summary.
+data: "only old backups in one folder are affected" is the useful summary.
 
 What damage means for each kind of file:
 * A partial model or database file loads but holds wrong values in the gap.
@@ -163,7 +163,7 @@ the owner the source can be released.
 ## Reporting
 
 Lead with the answer:
-> "Almost everything is back: 1,111,307 files are fully recoverable, 3.8 MiB is lost in 24 files, all in one folder."
+> "Almost everything is back: 998,412 files are fully recoverable; 2 MiB is lost, in 17 files, all in one folder."
 
 Then give the table, then the options, each with what it costs and what it could gain.
 End with the one decision you need from the owner. Keep the owner's vocabulary; they

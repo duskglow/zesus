@@ -112,13 +112,15 @@ Validated end to end on a real 1 TB single-disk pool:
 Multi-disk (v2), validated so far:
 * RAIDZ math: an independent reference, every erasure pattern (p = 1..3), and synthetic
   member disks (`tests/unit/test_raidz_*.py`).
-* A real 4-wide RAIDZ1 with one member missing (kotori): the history and datasets phases
+* A real 16 TB, 4-wide RAIDZ1 pool with one member missing: the history and datasets phases
   found the destroyed zvol. 51k data blocks verified, 72% of them rebuilt from parity.
   900 MiB extracted, with its GPT CRCs intact.
 * Single-disk maps and extractions are byte-identical to v1.
-* Not yet: real OpenZFS RAIDZ2/3 and mirror pools. `tests/unit/test_zfs_fixtures.py`
-  skips until `dev/make_zfs_fixtures.sh` has been run (needs ZFS; in WSL, run
-  `sudo apt install zfs-dkms zfsutils-linux`).
+* Real OpenZFS mirror and RAIDZ1/2/3 pools (`tests/fixtures/zfs`, built by
+  `dev/make_zfs_fixtures.sh`; in WSL it needs `zfs-dkms` and runs on loop devices):
+  on-disk parity matches for every live block. Every tolerable member loss is
+  byte-identical, one loss too many never writes a wrong byte, and destroyed zvols are
+  recovered carved-only.
 
 Open items, roughly by value:
 1. Carved-only reconstruction for destroyed ZFS **filesystem** datasets (the volume path in
@@ -140,7 +142,7 @@ scripts, and update the skill to use them:
   root birth txg with its destroy txg, and the lost blocks' birth txgs with any other
   generation. Answer "could carving recover more?" with the numbers.
 * `zesus send --verify`: hash the copies on the destination and compare them with the
-  staging manifest (what `C:\zfr-work\verify_seika.py` did by hand). Also record hashes
+  staging manifest (previously a hand-written script). Also record hashes
   for staged copies that are reused, which now have none.
 * `zesus recheck MAP IMAGES...`: re-read only the lost blocks with a new member set (a
   late-arriving disk), and update the map and file statuses when blocks come back.
