@@ -204,6 +204,40 @@ def cmd_losses(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_recheck(args: argparse.Namespace) -> int:
+    from ..carve.scanner import Stop
+    from ..io.sourceset import SourceSet
+    from ..map.db import MapDB
+    from ..progress import MapPublisher, Progress, cli_logger
+    from ..recheck import recheck
+    from ..scan import pipeline
+
+    mappath = Path(args.map)
+    logsetup.setup(args.verbose, args.log or mappath.with_suffix(".log.jsonl"))
+    src = SourceSet.open(args.sources)
+    apply_parallel_args(args, [m.name for m in src])
+    db = MapDB(mappath)
+    stop = Stop()
+    stop.install()
+    prog = Progress("recheck")
+    prog.listen(cli_logger(log), 30)
+    publisher = MapPublisher(mappath)
+    prog.listen(publisher, 2.0)
+    ctx = pipeline.ScanContext(db=db, source=src, stop=stop, progress=prog, options={"progress_interval": 30})
+    try:
+        res = recheck(ctx, inventory=not args.no_inventory)
+    finally:
+        prog.finish("done")
+        publisher.close()
+        db.commit()
+        db.close()
+        src.close()
+    for v in res.volumes:
+        print(f"{v['volume']}: {v['recovered']} of {v['lost_before']} lost blocks recovered, "
+              f"{v['lost_after']} still lost")
+    return 0
+
+
 def cmd_info(args: argparse.Namespace) -> int:
     from ..map.db import MapDB
     from .report import print_info
@@ -266,6 +300,14 @@ def build_parser() -> argparse.ArgumentParser:
     lo.add_argument("--no-ranges", action="store_true", help="omit the zero-filled byte ranges")
     lo.add_argument("-o", "--out", help="write the report to this file instead of printing it")
     lo.set_defaults(func=cmd_losses)
+    rc = sub.add_parser("recheck", help="retry only the lost blocks with new evidence (e.g. a member disk "
+                                        "that arrived after the scan)")
+    rc.add_argument("map")
+    rc.add_argument("sources", nargs="+", help="every member image, including the new one (read-only)")
+    rc.add_argument("--no-inventory", action="store_true",
+                    help="do not rebuild the file inventory afterwards (file statuses stay as they were)")
+    add_parallel_args(rc)
+    rc.set_defaults(func=cmd_recheck)
     i = sub.add_parser("info", help="summarize a map")
     i.add_argument("map")
     i.set_defaults(func=cmd_info)

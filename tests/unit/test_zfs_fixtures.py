@@ -247,3 +247,25 @@ def test_losses_report_names_blocks_a_missing_disk_could_restore(name, unpacked,
     assert rep.members_checked and "absent" in rep.member_note
     text = markdown(rep)
     assert "Could carving recover more?" in text and "no." in text
+
+
+@pytest.mark.parametrize("name", [n for n in POOLS if n.startswith("raidz")] or ["(no raidz fixture)"])
+def test_recheck_with_a_late_member_recovers_the_lost_blocks(name, unpacked, tmp_path):
+    from zesus.cli.main import main
+    from zesus.map.db import MapDB
+    m = manifest(name)
+    paths = unpacked(name)
+    p = nparity(m)
+    mapfile = tmp_path / "m.sqlite"
+    scan(paths, mapfile, "history,datasets,reconstruct")
+    scan(paths[p + 1:], mapfile, "verify")                     # verified with p+1 members missing
+    db = MapDB(mapfile, readonly=True)
+    lost = db.execute("SELECT n_missing + n_damaged FROM volumes WHERE name LIKE '%/vol'").fetchone()[0]
+    db.close()
+    assert lost > 0
+    assert main(["-q", "recheck", str(mapfile), *map(str, paths), "--workers", "1"]) == 0
+    db = MapDB(mapfile, readonly=True)
+    assert db.execute("SELECT n_missing + n_damaged FROM volumes WHERE name LIKE '%/vol'").fetchone()[0] == 0
+    db.close()
+    img, info = extract_volume(mapfile, paths, "vol", tmp_path / "out")
+    assert info["status"] == "full" and img.read_bytes()[:len(content(m, "vol"))] == content(m, "vol")

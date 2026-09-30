@@ -291,13 +291,14 @@ class Verifier:
         return sl, blkid, ok, zeroed, (win.repaired if win is not None else 0)
 
     # ------------------------------------------------------------------ fallback
-    def fallback(self, status: np.ndarray) -> None:
+    def fallback(self, status: np.ndarray,
+                 retry: tuple[int, ...] = (BlockStatus.CKSUM_MISMATCH, BlockStatus.ZEROED)) -> None:
         """For failed blocks, try (a) other DVAs/copies of the same pointer via the full
         reader, then (b) older candidates in the same span, newest first."""
         failed_spans = {}
         for sp in self.spans.values():
             seg = status[sp.first:sp.first + sp.count]
-            bad = np.nonzero((seg == BlockStatus.CKSUM_MISMATCH) | (seg == BlockStatus.ZEROED))[0]
+            bad = np.nonzero(np.isin(seg, np.array(retry, dtype=np.uint8)))[0]
             if len(bad):
                 failed_spans[sp.span] = bad
         if not failed_spans:
