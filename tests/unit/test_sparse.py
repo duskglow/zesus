@@ -39,3 +39,14 @@ def test_interrupted_output_never_appears_under_its_real_name(tmp_path):
     with ex._open_out(target, 4) as f:
         f.write(b"done")
     assert target.read_bytes() == b"done"
+
+
+def test_offset_view_writes_at_its_base(tmp_path):
+    from zesus.extract.engine import _OffsetFile
+    p = tmp_path / "f.bin"
+    with open(p, "wb") as f:
+        f.write(b"." * 32)
+        v = _OffsetFile(f, 10)
+        v.seek(2)
+        v.write(b"XY")
+    assert p.read_bytes() == b"." * 12 + b"XY" + b"." * 18

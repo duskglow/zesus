@@ -41,6 +41,20 @@ log = logging.getLogger(__name__)
 
 GAP_PATTERN = b"<<ZESUS:UNRECOVERABLE>>\n"
 WRITING_SUFFIX = ".zesus-writing"      # an output still being written
+BULK_EXTENT = 4 << 20                   # file extents at least this long use the windowed path
+
+
+class _OffsetFile:
+    """A view of an output file shifted by *base*: position 0 is *base* in the file."""
+
+    def __init__(self, f, base: int) -> None:
+        self.f, self.base = f, base
+
+    def seek(self, pos: int, whence: int = 0) -> int:
+        return self.f.seek(pos + self.base if whence == 0 else pos, whence) - self.base
+
+    def write(self, b) -> int:
+        return self.f.write(b)
 
 
 @dataclass
@@ -137,55 +151,71 @@ class Extractor:
         Blocks are read in physical order (the source may be a spinning disk), verified,
         decompressed and written to their logical position.
         """
+        path = self.out / out_name
+        rec = OutputRecord(kind=kind, path=str(path), source=source_desc, size=length, status="full")
+        with self._open_out(path, length) as f:
+            self._copy_range(f, volume_id, start, length, rec, label=f"{source_desc} → {path}",
+                             stage=f"extract {out_name}")
+            for g in rec.gaps:
+                self._fill(f, g.offset, g.length)
+        self._finish(rec, path, image=True)
+        return rec
+
+    def _copy_range(self, f, volume_id: int, start: int, length: int, rec: OutputRecord, *,
+                    label: str = "", stage: str | None = None, lv: LogicalVolume | None = None) -> None:
+        """Copy volume bytes [start, start+length) into *f* at offset 0, verified, reading in
+        physical order through large pipelined windows. Gaps go into *rec* (relative to
+        *start*). *stage*: report progress as its own stage (images); None: leave it."""
         v = self.db.execute("SELECT * FROM volumes WHERE id=?", (volume_id,)).fetchone()
         bs = v["volblocksize"]
         end = start + length
         lo, hi = start // bs, -(-end // bs)
-        path = self.out / out_name
-        rec = OutputRecord(kind=kind, path=str(path), source=source_desc, size=length, status="full")
-        spans = load_spans(self.db, volume_id)
+        spans = self._spans(volume_id)
         wl = add_extents(self.pool, chosen_blocks(
             self.pool, spans, {BlockStatus.OK, BlockStatus.OK_STALE, BlockStatus.UNKNOWN},
             blk_range=(lo, hi), label="extract", stop=self.stop))
         n = len(wl["blkid"])
         written = np.zeros(hi - lo, dtype=bool)
         total = float(wl["psize"].sum()) if n else 0.0
-        lv = LogicalVolume(self.pool, self.db, volume_id)
-        log.info("extracting %s → %s: %d data blocks (%.1f GiB on disk)", source_desc, path, n, total / (1 << 30))
-        if self.progress:
-            self.progress.begin(f"extract {out_name}", total, "bytes")
-        with self._open_out(path, length) as f:
-            # Pipeline: one thread reads the next window of the physical-order plan while
-            # workers verify and decompress earlier ones; blocks are written in plan order.
-            reads = prefetch((self._read_window(w) for w in windows(wl)), depth=SETTINGS.io_depth)
-            decoded = ordered_map(lambda r: self._decode_window(wl, r), reads,
-                                  workers=SETTINGS.workers, ahead=SETTINGS.workers + 1)
-            try:
-                for sl, results in decoded:
-                    if self._stopped():
-                        self._cancel(rec)
-                        break
-                    for k, (data, raw) in enumerate(results):
-                        idx = sl.start + k
-                        blkid = int(wl["blkid"][idx])
-                        if data is None:
-                            data = self._fallback_block(lv, wl, idx, raw, rec)
-                        if data is None:
-                            continue
-                        self._write_block(f, blkid, bs, data, start, end)
-                        written[blkid - lo] = True
-                    if self.progress:
-                        self.progress.advance(float(wl["psize"][sl].sum()))
-            finally:
-                decoded.close()
-            if rec.extra.get("cancelled"):
-                self._gap_unwritten(rec, written, lo, bs, start, end)
-            else:
-                self._fill_the_rest(rec, f, volume_id, written, lv, lo, hi, bs, start, end)
-            for g in rec.gaps:
-                self._fill(f, g.offset, g.length)
-        self._finish(rec, path, image=True)
-        return rec
+        lv = lv or LogicalVolume(self.pool, self.db, volume_id)
+        if stage:
+            log.info("extracting %s: %d data blocks (%.1f GiB on disk)", label, n, total / (1 << 30))
+            if self.progress:
+                self.progress.begin(stage, total, "bytes")
+        # Pipeline: one thread reads the next window of the physical-order plan while
+        # workers verify and decompress earlier ones; blocks are written in plan order.
+        reads = prefetch((self._read_window(w) for w in windows(wl)), depth=SETTINGS.io_depth)
+        decoded = ordered_map(lambda r: self._decode_window(wl, r), reads,
+                              workers=SETTINGS.workers, ahead=SETTINGS.workers + 1)
+        try:
+            for sl, results in decoded:
+                if self._stopped():
+                    self._cancel(rec)
+                    break
+                for k, (data, raw) in enumerate(results):
+                    idx = sl.start + k
+                    blkid = int(wl["blkid"][idx])
+                    if data is None:
+                        data = self._fallback_block(lv, wl, idx, raw, rec)
+                    if data is None:
+                        continue
+                    self._write_block(f, blkid, bs, data, start, end)
+                    written[blkid - lo] = True
+                if self.progress and stage:
+                    self.progress.advance(float(wl["psize"][sl].sum()))
+        finally:
+            decoded.close()
+        if rec.extra.get("cancelled"):
+            self._gap_unwritten(rec, written, lo, bs, start, end)
+        else:
+            self._fill_the_rest(rec, f, volume_id, written, lv, lo, hi, bs, start, end)
+
+    def _spans(self, volume_id: int) -> dict:
+        """Level-1 candidates of a volume, loaded once per extractor (files share them)."""
+        cache = self.__dict__.setdefault("_span_cache", {})
+        if volume_id not in cache:
+            cache[volume_id] = load_spans(self.db, volume_id)
+        return cache[volume_id]
 
     def _fill_the_rest(self, rec, f, volume_id, written, lv, lo, hi, bs, start, end) -> None:
         """Everything the physical pass did not write, driven by the run-length coverage
@@ -448,6 +478,17 @@ class Extractor:
                     else:
                         f.seek(0)
                         f.write(data[: x["length"]])
+                    continue
+                if x["length"] >= BULK_EXTENT and x["volume_offset"] is not None:
+                    # large extents: the pipelined physical-order path used for images
+                    sub = OutputRecord(kind="file", path=rec.path, source=rec.source, size=x["length"],
+                                       status="full")
+                    self._copy_range(_OffsetFile(f, x["file_offset"]), lv.volume_id, x["volume_offset"],
+                                     x["length"], sub, lv=lv)
+                    for g in sub.gaps:
+                        self._add_gap(rec, x["file_offset"] + g.offset, g.length, g.reason)
+                    if sub.extra.get("cancelled"):
+                        rec.extra["cancelled"] = True
                     continue
                 data, gaps = lv.read(x["volume_offset"], x["length"])
                 if any(data):
