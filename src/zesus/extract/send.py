@@ -127,19 +127,21 @@ def parse_dest(dest: str) -> tuple[str | None, str]:
 # ---------------------------------------------------------------------- main
 
 def send(db: MapDB, pool: Pool, fs_id: int, patterns: list[str] | None, opts: SendOptions,
-         progress: Callable[[str], None] | None = None) -> SendResult:
+         progress: Callable[[str], None] | None = None, stop=None, meter=None) -> SendResult:
+    """*stop*: an Event (or Stop) checked between files and batches. *meter*: a
+    zesus.progress.Progress for staging progress."""
     say = progress or (lambda m: log.info("%s", m))
     if opts.verify_only:
         res = SendResult()
     else:
-        res = _send(db, pool, fs_id, patterns, opts, say)
+        res = _send(db, pool, fs_id, patterns, opts, say, stop, meter)
     if (opts.verify or opts.verify_only) and not opts.dry_run and not res.errors:
         verify_destination(db, fs_id, patterns, opts, res, say)
     return res
 
 
 def _send(db: MapDB, pool: Pool, fs_id: int, patterns: list[str] | None, opts: SendOptions,
-          say: Callable[[str], None]) -> SendResult:
+          say: Callable[[str], None], stop=None, meter=None) -> SendResult:
     res = SendResult(dry_run=opts.dry_run)
     tools = Tools()
     host, dpath = parse_dest(opts.dest)
@@ -169,14 +171,24 @@ def _send(db: MapDB, pool: Pool, fs_id: int, patterns: list[str] | None, opts: S
             say(f"resuming: {len(done)} entries already done (ledger {ledger})")
     batches = _batches(db, sel, local_rel, done, opts.batch_bytes)
     ex = None
+    ev = getattr(stop, "event", stop)
     for bi, batch in enumerate(batches, 1):
+        if ev is not None and ev.is_set():
+            res.errors.append(f"stopped before batch {bi} of {len(batches)}; run the same command to resume")
+            say(res.errors[-1])
+            return res
         # ---- 1. stage
-        ex = Extractor(db, pool, Options(out_dir=opts.staging, skip_existing=True))
+        ex = Extractor(db, pool, Options(out_dir=opts.staging, skip_existing=True), progress=meter, stop=stop)
         size = sum(r["size"] or 0 for r in batch if r["type"] == "file")
         say(f"batch {bi}/{len(batches)}: staging {sum(1 for r in batch if r['type'] == 'file')} files "
             f"({size / (1 << 30):.1f} GiB) into {opts.staging}")
         ex.extract_files(fs_id, entries=batch, local_rel=local_rel)
         root = ex.fs_root(fs)
+        if ex.cancelled:
+            # the batch is incomplete: send nothing of it, keep what is staged for the resume
+            res.errors.append(f"stopped while staging batch {bi}; run the same command to resume")
+            say(res.errors[-1])
+            return res
         res.staged += sum(1 for r in ex.records if r.kind == "file")
         ex.write_manifest({"purpose": "staging for zesus send"})
         # ---- 2. rsync

@@ -83,17 +83,52 @@ def test_jobs_refuse_without_evidence_and_validate_input(client, tmp_path):
     assert client.post("/api/jobs/doesnotexist/cancel").status_code == 404
 
 
-def test_scan_job_runs_reports_progress_and_can_be_cancelled(tmp_path, mapfile):
+def wait_job(c, jid, timeout=60):
+    t = time.monotonic()
+    while time.monotonic() - t < timeout:
+        j = next(x for x in c.get("/api/jobs").json()["jobs"] if x["id"] == jid)
+        if j["state"] != "running":
+            return j
+        time.sleep(0.2)
+    raise AssertionError(f"job {jid} still running: {j}")
+
+
+def test_scan_job_runs_as_its_own_process_and_survives_a_server_restart(tmp_path, mapfile):
     img = tmp_path / "blank.img"
-    img.write_bytes(b"\0" * (16 << 20))                 # no pool in it: phases finish quickly
+    img.write_bytes(b"\0" * (16 << 20))                # no pool in it: phases finish quickly
     c = TestClient(create_app(str(mapfile), [str(img)]))
     jid = c.post("/api/scan", json={"phases": ["history", "datasets"]}).json()["id"]
-    assert c.post("/api/scan", json={"phases": ["history"]}).status_code in (200, 409)
-    for _ in range(100):
-        j = next(x for x in c.get("/api/jobs").json()["jobs"] if x["id"] == jid)
-        if j["state"] not in ("queued", "running"):
-            break
-        time.sleep(0.05)
+    j = wait_job(c, jid)
     assert j["state"] == "done", j
-    assert "progress" in j and j["progress"]["state"] == j["state"]
-    assert c.post(f"/api/jobs/{jid}/cancel").status_code == 200    # cancelling a finished job is harmless
+    assert j["argv"][0] == "scan" and j["pid"]
+    # a new server (a restart, or an upgrade) still knows the job and its result
+    c2 = TestClient(create_app(str(mapfile), [str(img)]))
+    j2 = next(x for x in c2.get("/api/jobs").json()["jobs"] if x["id"] == jid)
+    assert j2["state"] == "done" and j2["message"] == j["message"]
+    assert c2.post(f"/api/jobs/{jid}/cancel").status_code == 200   # cancelling a finished job is harmless
+    assert c2.post("/api/jobs/nope/cancel").status_code == 404
+
+
+def test_responses_carry_the_build_and_the_page_is_fixed_at_start(mapfile):
+    c = TestClient(create_app(str(mapfile), None))
+    r = c.get("/api/overview")
+    build = r.headers["X-Zesus-Build"]
+    page = c.get("/").text
+    assert f'const BUILD = "{build}"' in page and "__ZESUS_BUILD__" not in page
+    assert c.get("/api/build").json()["build"] == build
+    other = TestClient(create_app(str(mapfile), None)).get("/api/build").json()["build"]
+    assert other != build                                  # a restarted server is a different build
+
+
+def test_event_stream_pushes_the_job_list(mapfile):
+    import json
+    c = TestClient(create_app(str(mapfile), None))
+    with c.stream("GET", "/api/stream?once=true") as r:
+        events = []
+        for line in r.iter_lines():
+            if line.startswith("event:"):
+                events.append(line.split(":", 1)[1].strip())
+            if line.startswith("data:") and events[-1] == "jobs":
+                data = json.loads(line[5:])
+                break
+    assert events[:2] == ["hello", "jobs"] and data["jobs"] == [] and data["build"]

@@ -171,7 +171,8 @@ class MapPublisher:
     """Writes snapshots to ``meta['progress:<pid>']`` of a map without ever blocking."""
 
     def __init__(self, map_path: str | Path) -> None:
-        self.key = f"progress:{os.getpid()}"
+        jid = os.environ.get("ZESUS_JOB_ID")
+        self.key = f"progress:job:{jid}" if jid else f"progress:{os.getpid()}"
         try:
             self.conn: sqlite3.Connection | None = sqlite3.connect(str(map_path), timeout=0,
                                                                    check_same_thread=False)

@@ -62,7 +62,9 @@ class Stop:
     """Cooperative cancellation: Ctrl-C finishes the current chunk, then stops."""
 
     def __init__(self) -> None:
+        from ..jobs import watch_for_cancel
         self.event = threading.Event()
+        watch_for_cancel(self.event)        # a web UI job: its cancel file stops it too
 
     def install(self) -> None:
         def handler(signum, frame):  # noqa: ARG001

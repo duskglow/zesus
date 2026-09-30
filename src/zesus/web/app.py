@@ -3,8 +3,9 @@
     zesus web MAP [--source IMAGE ...] [--port 8765]
 
 It binds to 127.0.0.1 by default. Browsing opens the map read-only. Jobs (scan, extract,
-send) run on background threads using the same engines as the CLI. Each job reports
-progress (percent, rate, ETA, elapsed) and can be cancelled. Evidence is the images
+send) are the same zesus commands, run as separate processes that outlive the server
+(see zesus.jobs). Each job reports progress (percent, rate, ETA, elapsed), streamed to
+the page, and can be cancelled. Evidence is the images
 given with --source, or else the member files recorded in the map. Either way it is
 checked against the map and opened read-only.
 """
@@ -13,11 +14,7 @@ from __future__ import annotations
 
 import json
 import logging
-import os
-import sys
-import threading
 import time
-import traceback
 import uuid
 from importlib import resources
 from pathlib import Path
@@ -33,13 +30,24 @@ def create_app(map_path: str, source: str | list[str] | None = None):
     from fastapi import FastAPI, HTTPException
     from fastapi.responses import HTMLResponse
 
+    from .. import __version__
+    from ..jobs import JobStore
     from ..map.db import MapDB
 
     app = FastAPI(title="Zesus", docs_url=None, redoc_url=None)
-    lock = threading.Lock()
-    jobs: dict[str, Job] = {}
     sources = [source] if isinstance(source, str) else list(source or [])
-    rates: dict[str, float] = {}        # measured output throughput (bytes/s) by job kind
+    # The page this server was started with, and a build id (version + start) sent with
+    # every response. A page from another build (the server was upgraded or restarted)
+    # notices the change and reloads itself instead of breaking against a different API.
+    BUILD = f"{__version__}+{uuid.uuid4().hex[:8]}"
+    PAGE = resources.files("zesus.web").joinpath("index.html").read_text(encoding="utf-8") \
+        .replace("__ZESUS_BUILD__", BUILD)
+
+    @app.middleware("http")
+    async def build_header(request, call_next):
+        response = await call_next(request)
+        response.headers["X-Zesus-Build"] = BUILD
+        return response
 
     def evidence_paths() -> list[str]:
         """Evidence for jobs: --source, else the member files the map recorded (if present)."""
@@ -51,17 +59,6 @@ def create_app(map_path: str, source: str | list[str] | None = None):
             return [x for x in recorded_paths(d) if Path(x).exists()]
         finally:
             d.close()
-
-    def open_evidence_for(d):
-        from ..evidence import EvidenceError, open_evidence, pool_for_map
-        paths = evidence_paths()
-        if not paths:
-            raise HTTPException(400, "no evidence: start the web UI with --source IMAGE (one per member disk)")
-        try:
-            ss = open_evidence(d, paths)
-            return ss, pool_for_map(d, ss)
-        except EvidenceError as exc:
-            raise HTTPException(400, str(exc)) from exc
 
     def db() -> MapDB:
         return MapDB(map_path, readonly=True)
@@ -75,7 +72,11 @@ def create_app(map_path: str, source: str | list[str] | None = None):
 
     @app.get("/", response_class=HTMLResponse)
     def index() -> str:
-        return resources.files("zesus.web").joinpath("index.html").read_text(encoding="utf-8")
+        return PAGE
+
+    @app.get("/api/build")
+    def build() -> dict:
+        return {"build": BUILD, "version": __version__}
 
     @app.get("/api/overview")
     def overview() -> dict:
@@ -193,63 +194,83 @@ def create_app(map_path: str, source: str | list[str] | None = None):
         return rows("SELECT * FROM events ORDER BY id DESC LIMIT ?", (limit,))
 
     # ------------------------------------------------------------------ jobs
-    def start_job(kind: str, req: dict, fn) -> dict:
-        job = Job(kind, req)
-        with lock:
-            if kind == "scan" and any(j.kind == "scan" and j.state in ("queued", "running") for j in jobs.values()):
-                raise HTTPException(409, "a scan is already running")
-            jobs[job.id] = job
+    # A job is a zesus command run as its own process (see zesus.jobs): restarting or
+    # upgrading this server neither kills a job nor forgets it.
+    store = JobStore(map_path)
 
-        def run() -> None:
-            job.state = "running"
-            try:
-                fn(job)
-                if job.stop.is_set():
-                    job.state = "cancelled"
-                elif job.state == "running":
-                    job.state = "done"
-            except HTTPException as exc:
-                job.state, job.message = "failed", str(exc.detail)
-            except Exception as exc:
-                job.state, job.message = "failed", str(exc)
-                log.error("job %s failed: %s", job.id, traceback.format_exc())
-            job.finished = time.time()
-            job.progress.finish(job.state, job.message or job.state)
-
-        threading.Thread(target=run, daemon=True, name=f"zesus-job-{job.id}").start()
-        return {"id": job.id}
-
-    @app.get("/api/jobs")
-    def list_jobs() -> dict:
-        with lock:
-            mine = [j.as_dict() for j in jobs.values()]
-        return {"jobs": mine, "external": external_progress()}
-
-    def external_progress() -> list[dict]:
-        """Scans run from the command line publish progress into the map's meta table."""
-        out = []
-        now = time.time()
+    def progress_snapshots() -> dict[str, dict]:
+        out = {}
         for r in rows("SELECT key, value FROM meta WHERE key LIKE 'progress:%'"):
             try:
-                snap = json.loads(r["value"])
+                out[r["key"]] = json.loads(r["value"])
             except ValueError:
                 continue
-            if snap.get("pid") == os.getpid():
+        return out
+
+    def job_list(snaps: dict | None = None) -> list[dict]:
+        snaps = progress_snapshots() if snaps is None else snaps
+        return [j for j in (store.get(jid, snaps.get(f"progress:job:{jid}")) for jid in store.ids()) if j]
+
+    def external_progress(snaps: dict | None = None) -> list[dict]:
+        """Commands run from a terminal publish their progress into the map too."""
+        snaps = progress_snapshots() if snaps is None else snaps
+        out, now = [], time.time()
+        for key, snap in snaps.items():
+            if key.startswith("progress:job:"):
                 continue
             snap["stale"] = now - snap.get("updated", 0) > 120 and snap.get("state") == "running"
-            if snap.get("state") == "running" or now - snap.get("updated", 0) < 3600:
+            age = now - snap.get("updated", 0)
+            # finished runs for an hour; a "running" one that stopped reporting for a day
+            if age < 3600 or (snap.get("state") == "running" and age < 86400):
                 out.append(snap)
         return out
 
+    def jobs_payload() -> dict:
+        snaps = progress_snapshots()
+        return {"jobs": job_list(snaps), "external": external_progress(snaps), "build": BUILD}
+
+    @app.get("/api/jobs")
+    def list_jobs() -> dict:
+        return jobs_payload()
+
+    @app.get("/api/stream")
+    async def stream(once: bool = False):
+        """Server-sent events: the job list whenever it changes (checked every second).
+        *once* ends the stream after the first list (for tests and scripts)."""
+        import asyncio
+
+        from starlette.concurrency import run_in_threadpool
+        from starlette.responses import StreamingResponse
+
+        async def gen():
+            last, idle = None, 0
+            yield f"event: hello\ndata: {json.dumps({'build': BUILD})}\n\n"
+            while True:
+                payload = json.dumps(await run_in_threadpool(jobs_payload), default=str)
+                if payload != last:
+                    last, idle = payload, 0
+                    yield f"event: jobs\ndata: {payload}\n\n"
+                    if once:
+                        return
+                else:
+                    idle += 1
+                    if idle % 15 == 0:
+                        yield ": keep-alive\n\n"
+                await asyncio.sleep(1)
+        return StreamingResponse(gen(), media_type="text/event-stream",
+                                 headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+
     @app.post("/api/jobs/{jid}/cancel")
     def cancel_job(jid: str) -> dict:
-        with lock:
-            job = jobs.get(jid)
-        if job is None:
+        if not store.cancel(jid):
             raise HTTPException(404, "no such job")
-        job.stop.set()
-        job.progress.note("cancelling: finishing the current step")
-        return {"id": jid, "state": job.state}
+        return {"id": jid, "cancelling": True}
+
+    def running(kind: str) -> bool:
+        return any(j["kind"] == kind and j["state"] == "running" for j in job_list())
+
+    def start(kind: str, req: dict, argv: list[str]) -> dict:
+        return {"id": store.start(kind, req, argv)}
 
     # ------------------------------------------------------------------ estimates
     @app.post("/api/estimate")
@@ -265,17 +286,17 @@ def create_app(map_path: str, source: str | list[str] | None = None):
             elif kind in ("volume", "partition"):
                 if kind == "volume":
                     v = d.execute("SELECT id, volsize FROM volumes WHERE id=?", (int(req["volume_id"]),)).fetchone()
-                    vid, start, length = v["id"], 0, v["volsize"]
+                    vid, start_, length = v["id"], 0, v["volsize"]
                 else:
                     pr = d.execute("SELECT * FROM partitions WHERE id=?", (int(req["partition_id"]),)).fetchone()
-                    vid, start, length = pr["volume_id"], pr["start"], pr["length"]
-                est = estimate_volume_range(d, vid, start, length)
+                    vid, start_, length = pr["volume_id"], pr["start"], pr["length"]
+                est = estimate_volume_range(d, vid, start_, length)
                 out_bytes = est["read_bytes"]
             else:
                 raise HTTPException(400, f"unknown kind {kind!r}")
         finally:
             d.close()
-        rate = rates.get("extract") or measured_rate()
+        rate = measured_rate()
         est["rate"] = rate
         est["eta_s"] = (out_bytes / rate) if rate else None
         est["rate_source"] = "measured by an earlier job" if rate else None
@@ -286,11 +307,12 @@ def create_app(map_path: str, source: str | list[str] | None = None):
         return est
 
     def measured_rate() -> float | None:
-        best = None
-        for snap in external_progress():
+        """Throughput of the most recent extraction or verification (jobs or terminal runs)."""
+        best, when = None, 0.0
+        for snap in progress_snapshots().values():
             if snap.get("unit") == "bytes" and str(snap.get("stage", "")).startswith(("verify", "extract")) \
-                    and snap.get("rate"):
-                best = snap["rate"]
+                    and snap.get("rate") and (snap.get("done") or 0) > (64 << 20) and snap.get("updated", 0) > when:
+                best, when = snap["rate"], snap.get("updated", 0)
         return best
 
     def check_out(out: str) -> str | None:
@@ -306,6 +328,12 @@ def create_app(map_path: str, source: str | list[str] | None = None):
             return "the output directory is an evidence file"
         return None
 
+    def need_evidence() -> list[str]:
+        ev = evidence_paths()
+        if not ev:
+            raise HTTPException(400, "no evidence: start the web UI with --source IMAGE (one per member disk)")
+        return ev
+
     # ------------------------------------------------------------------ extraction
     @app.post("/api/extract")
     def extract(req: dict) -> dict:
@@ -314,49 +342,27 @@ def create_app(map_path: str, source: str | list[str] | None = None):
             raise HTTPException(400, "output directory required")
         if (problem := check_out(out)):
             raise HTTPException(400, problem)
-        if not evidence_paths():
-            raise HTTPException(400, "no evidence: start the web UI with --source IMAGE (one per member disk)")
-
-        def run(job: Job) -> None:
-            from ..extract.engine import Extractor, Options
-            d = MapDB(map_path, readonly=True)
-            ss, pool = open_evidence_for(d)
-            try:
-                ex = Extractor(d, pool, Options(out_dir=Path(out), fill=req.get("fill", "zero"),
-                                                force=bool(req.get("force")), hash_outputs=bool(req.get("hash", True))),
-                               progress=job.progress, stop=job.stop)
-                t0 = time.monotonic()
-                kind = req.get("kind")
-                if kind == "volume":
-                    v = d.execute("SELECT * FROM volumes WHERE id=?", (int(req["volume_id"]),)).fetchone()
-                    ex.extract_volume_range(v["id"], 0, v["volsize"], v["name"].replace("/", "_") + ".img",
-                                            "volume", v["name"])
-                elif kind == "partition":
-                    pr = d.execute("SELECT * FROM partitions WHERE id=?", (int(req["partition_id"]),)).fetchone()
-                    ex.extract_volume_range(pr["volume_id"], pr["start"], pr["length"],
-                                            f"volume{pr['volume_id']}-part{pr['idx']}.img", "partition",
-                                            f"volume {pr['volume_id']} partition {pr['idx']}")
-                elif kind == "files":
-                    ex.extract_files(int(req["fs_id"]), patterns=req.get("paths") or None,
-                                     statuses=set(req.get("statuses") or ["full", "partial", "none"]))
-                else:
-                    raise ValueError(f"unknown kind {kind!r}")
-                ex.write_manifest({"map": map_path, "source": ss.name, "sources": [m.name for m in ss]})
-                written = sum(r.size - r.lost_bytes for r in ex.records if r.kind in ("file", "volume", "partition"))
-                dt = time.monotonic() - t0
-                if written > (64 << 20) and dt > 1 and not ex.cancelled:
-                    rates["extract"] = written / dt
-                job.outputs = [{"path": r.path, "status": r.status, "lost_bytes": r.lost_bytes,
-                                "size": r.size, "cancelled": bool(r.extra.get("cancelled"))} for r in ex.records]
-                full = sum(1 for r in ex.records if r.status == "full")
-                job.message = (f"{len(ex.records)} outputs ({full} full)"
-                               + ("; CANCELLED: see manifest.json for what was not written" if ex.cancelled else ""))
-                ss.verify_unchanged()
-            finally:
-                ss.close()
-                d.close()
-
-        return start_job("extract", req, run)
+        argv = ["extract", map_path, *need_evidence(), "-o", out, "--fill", req.get("fill", "zero")]
+        if req.get("force"):
+            argv.append("--force")
+        if not req.get("hash", True):
+            argv.append("--no-hash")
+        kind = req.get("kind")
+        if kind == "volume":
+            argv += ["--volume", str(int(req["volume_id"]))]
+        elif kind == "partition":
+            pr = rows("SELECT volume_id, idx FROM partitions WHERE id=?", (int(req["partition_id"]),))
+            if not pr:
+                raise HTTPException(404, "no such partition")
+            argv += ["--partition", f"{pr[0]['volume_id']}:{pr[0]['idx']}"]
+        elif kind == "files":
+            argv += ["--fs", str(int(req["fs_id"])),
+                     "--status", ",".join(req.get("statuses") or ["full", "partial", "none"])]
+            for pth in req.get("paths") or []:
+                argv += ["--path", pth]
+        else:
+            raise HTTPException(400, f"unknown kind {kind!r}")
+        return start("extract", req, argv)
 
     # ------------------------------------------------------------------ scans
     @app.post("/api/scan")
@@ -366,42 +372,18 @@ def create_app(map_path: str, source: str | list[str] | None = None):
         bad = [x for x in phases if x not in ORDER]
         if not phases or bad:
             raise HTTPException(400, f"choose phases from {ORDER}" + (f" (unknown: {bad})" if bad else ""))
+        if running("scan") or running("recheck"):
+            raise HTTPException(409, "a scan is already running")
         for snap in external_progress():
             if snap.get("state") == "running" and not snap.get("stale"):
                 raise HTTPException(409, f"a scan is running in another process (pid {snap.get('pid')})")
-        if not evidence_paths():
-            raise HTTPException(400, "no evidence: start the web UI with --source IMAGE (one per member disk)")
-
-        def run(job: Job) -> None:
-            from ..io.sourceset import SourceSet
-            from ..progress import MapPublisher
-            from ..scan import pipeline
-            ss = SourceSet.open(evidence_paths())
-            d = MapDB(map_path)
-            pub = MapPublisher(map_path)
-            job.progress.listen(pub, 2.0)
-            try:
-                redo = {x for x in (req.get("redo") or []) if x in ORDER}
-                for name in redo:
-                    d.reset_phase(name)
-                d.commit()
-                opts = {"redo": redo, "progress_interval": 30,
-                        "limit_blocks": int(req["limit_blocks"]) if req.get("limit_blocks") else None}
-                ctx = pipeline.ScanContext(db=d, source=ss, stop=_StopAdapter(job.stop), progress=job.progress,
-                                           options=opts)
-                pipeline.run(ctx, phases)
-                job.message = "stopped; run again to resume" if job.stop.is_set() else f"phases {', '.join(phases)} done"
-            finally:
-                # publish the final state for other viewers before letting go of the map
-                failed = sys.exc_info()[0] is not None
-                pub({**job.progress.snapshot(),
-                     "state": "failed" if failed else ("cancelled" if job.stop.is_set() else "done")})
-                d.commit()
-                d.close()
-                pub.close()
-                ss.close()
-
-        return start_job("scan", req, run)
+        argv = ["scan", *need_evidence(), "-o", map_path, "--phases", ",".join(phases)]
+        redo = [x for x in (req.get("redo") or []) if x in ORDER]
+        if redo:
+            argv += ["--redo", ",".join(redo)]
+        if req.get("limit_blocks"):
+            argv += ["--limit-blocks", str(int(req["limit_blocks"]))]
+        return start("scan", req, argv)
 
     # ------------------------------------------------------------------ send (rsync)
     @app.get("/api/send/tools")
@@ -414,74 +396,24 @@ def create_app(map_path: str, source: str | list[str] | None = None):
 
     @app.post("/api/send")
     def send_files(req: dict) -> dict:
-        import shlex
-
-        if not evidence_paths():
-            raise HTTPException(400, "no evidence: start the web UI with --source IMAGE (one per member disk)")
         if not req.get("dest") or not req.get("fs_id"):
             raise HTTPException(400, "destination and filesystem are required")
-        def run(job: Job) -> None:
-            from ..extract.send import SendOptions, send
-
-            def progress(msg: str) -> None:
-                job.log = (job.log + [msg])[-40:]
-                job.message = msg
-                job.progress.note(msg)
-
-            d = MapDB(map_path, readonly=True)
-            ss, pool = open_evidence_for(d)
-            try:
-                opts = SendOptions(
-                    dest=req["dest"], staging=Path(req.get("staging") or Path(map_path).resolve().parent / "staging"),
-                    ssh_args=shlex.split(req.get("ssh") or ""), overwrite=bool(req.get("overwrite")),
-                    include_partial=bool(req.get("include_partial")), dry_run=bool(req.get("dry_run")),
-                    sudo=bool(req.get("sudo")))
-                res = send(d, pool, int(req["fs_id"]), req.get("paths") or None, opts, progress=progress)
-                verb = "would send" if res.dry_run else "sent"
-                job.message = (f"{verb} {res.sent} files; metadata restored on {res.restored}; held back "
-                               f"{res.held_back_partial} partial, {res.unrecoverable} unrecoverable")
-                job.result = res.__dict__
-                if res.errors:
-                    job.state = "failed"
-                    job.message += " | " + " | ".join(res.errors[:3])
-                ss.verify_unchanged()
-            finally:
-                ss.close()
-                d.close()
-
-        return start_job("send", req, run)
+        staging = req.get("staging") or str(Path(map_path).resolve().parent / "staging")
+        argv = ["send", map_path, *need_evidence(), "--fs", str(int(req["fs_id"])), "--to", req["dest"],
+                "--staging", staging]
+        for pth in req.get("paths") or []:
+            argv += ["--path", pth]
+        if req.get("ssh"):
+            argv += ["--ssh", req["ssh"]]
+        if req.get("batch"):
+            argv += ["--batch", str(req["batch"])]
+        for flag, opt in (("overwrite", "--overwrite"), ("include_partial", "--include-partial"),
+                          ("dry_run", "--dry-run"), ("sudo", "--sudo"), ("verify", "--verify")):
+            if req.get(flag):
+                argv.append(opt)
+        return start("send", req, argv)
 
     return app
-
-
-class Job:
-    """A background job: its request, state, outputs, progress and stop event."""
-
-    def __init__(self, kind: str, request: dict) -> None:
-        from ..progress import Progress
-        self.id = uuid.uuid4().hex[:8]
-        self.kind, self.request = kind, request
-        self.state, self.message = "queued", ""
-        self.started, self.finished = time.time(), None
-        self.outputs: list[dict] = []
-        self.log: list[str] = []
-        self.result: dict | None = None
-        self.stop = threading.Event()
-        self.progress = Progress(kind)
-
-    def as_dict(self) -> dict[str, Any]:
-        return {"id": self.id, "kind": self.kind, "request": self.request, "state": self.state,
-                "message": self.message, "started": self.started, "finished": self.finished,
-                "outputs": self.outputs[:200], "n_outputs": len(self.outputs), "log": self.log[-12:],
-                "result": self.result, "cancelling": self.stop.is_set() and self.state == "running",
-                "progress": self.progress.snapshot()}
-
-
-class _StopAdapter:
-    """The scan pipeline expects an object with an ``event`` attribute."""
-
-    def __init__(self, ev: threading.Event) -> None:
-        self.event = ev
 
 
 def free_space(path: str) -> int | None:

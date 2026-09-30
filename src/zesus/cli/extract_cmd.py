@@ -154,6 +154,9 @@ def cmd_extract(args: argparse.Namespace) -> int:
     stop.install()
     prog = Progress("extract")
     prog.listen(cli_logger(log), args.progress_interval)
+    from ..progress import MapPublisher
+    publisher = MapPublisher(args.map)
+    prog.listen(publisher, 2.0)
     ex = Extractor(db, pool, Options(out_dir=Path(args.out), fill=args.fill,
                                      include_unverified=args.include_unverified, force=args.force,
                                      partial_suffix=args.partial_suffix, sparse=not args.no_sparse,
@@ -201,9 +204,22 @@ def cmd_extract(args: argparse.Namespace) -> int:
     full = sum(1 for r in ex.records if r.status == "full")
     part = sum(1 for r in ex.records if r.status == "partial")
     none = sum(1 for r in ex.records if r.status == "none")
-    log.info("done in %.0fs: %d outputs (%d full, %d partial, %d unrecoverable). Manifest: %s",
-             time.monotonic() - t0, len(ex.records), full, part, none, man)
+    log.info("%s in %.0fs: %d outputs (%d full, %d partial, %d unrecoverable). Manifest: %s",
+             "CANCELLED" if ex.cancelled else "done", time.monotonic() - t0, len(ex.records), full, part, none,
+             man)
+    prog.finish("cancelled" if ex.cancelled else "done")
+    publisher.close()
     src.verify_unchanged()
+    from ..jobs import job_id, write_exit
+    if job_id():
+        # exit code 2 (outputs with gaps) is a normal result for the web UI, not a failure
+        write_exit(0 if not ex.cancelled else 130, f"{len(ex.records)} outputs ({full} full, {part} partial, "
+                   f"{none} unrecoverable)" + ("; CANCELLED: see manifest.json" if ex.cancelled else ""),
+                   "cancelled" if ex.cancelled else "done",
+                   outputs=[{"path": r.path, "status": r.status, "lost_bytes": r.lost_bytes, "size": r.size,
+                             "cancelled": bool(r.extra.get("cancelled"))} for r in ex.records[:200]],
+                   n_outputs=len(ex.records), manifest=str(man))
+        return 0
     return 0 if not (part or none) else 2
 
 
@@ -228,7 +244,17 @@ def cmd_send(args: argparse.Namespace) -> int:
                        verify=args.verify, verify_only=args.verify_only,
                        include_partial=args.include_partial, dry_run=args.dry_run, sudo=args.sudo,
                        metadata=not args.no_metadata)
-    res = send(db, pool, args.fs, args.path or None, opts)
+    from ..carve.scanner import Stop
+    from ..progress import MapPublisher, Progress
+    stop = Stop()
+    stop.install()
+    prog = Progress("send")
+    publisher = MapPublisher(args.map)
+    prog.listen(publisher, 2.0)
+    res = send(db, pool, args.fs, args.path or None, opts, progress=lambda m: (log.info("%s", m), prog.note(m)),
+               stop=stop, meter=prog)
+    prog.finish("stopped" if stop.event.is_set() else ("failed" if res.errors else "done"))
+    publisher.close()
     log.info("%s: staged %d, sent %d, restored metadata on %d; held back %d partial, %d unrecoverable%s",
              "DRY RUN" if res.dry_run else "done", res.staged, res.sent, res.restored, res.held_back_partial,
              res.unrecoverable, f"; restore script: {res.script}" if res.script else "")

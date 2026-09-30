@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import logging
+import os
 import sys
 from pathlib import Path
 
@@ -329,13 +330,50 @@ def build_parser() -> argparse.ArgumentParser:
     return p
 
 
+class _LastMessage(logging.Handler):
+    """Remembers the last INFO+ line: a job's summary for the web UI."""
+
+    def __init__(self) -> None:
+        super().__init__(logging.INFO)
+        self.last = ""
+        self.errors: list[str] = []
+
+    def emit(self, record: logging.LogRecord) -> None:
+        msg = record.getMessage()
+        self.last = msg
+        if record.levelno >= logging.ERROR:
+            self.errors.append(msg)
+
+
 def main(argv: list[str] | None = None) -> int:
+    from ..jobs import job_id, write_exit
     args = build_parser().parse_args(argv)
+    tracker = None
+    if job_id():
+        tracker = _LastMessage()
+        logging.getLogger("zesus").addHandler(tracker)
+    code, state = 1, None
     try:
-        return int(args.func(args) or 0)
+        code = int(args.func(args) or 0)
+        return code
     except KeyboardInterrupt:
         log.error("aborted")
+        code, state = 130, "cancelled"
         return 130
+    except BaseException as exc:
+        if tracker is not None:
+            tracker.errors.append(f"{type(exc).__name__}: {exc}")
+        raise
+    finally:
+        if tracker is not None:
+            from ..jobs import JOB_DIR_ENV, JOB_ENV
+            flag = Path(os.environ[JOB_DIR_ENV]) / f"{os.environ[JOB_ENV]}.cancel"
+            if flag.exists():
+                state = "cancelled"
+            msg = "; ".join(tracker.errors[-3:]) if (code and tracker.errors) else tracker.last
+            if state == "cancelled":
+                msg = "stopped on request; run it again to resume where it stopped"
+            write_exit(code, msg, state, overwrite=False)
 
 
 def scan_main() -> int:

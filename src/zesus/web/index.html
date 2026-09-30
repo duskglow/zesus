@@ -188,7 +188,20 @@ dialog h2 { font-size: 16px; margin: 0 0 8px; }
 <script>
 const $ = s => document.querySelector(s);
 const esc = s => String(s ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
-const api = async (p, opt) => { const r = await fetch(p, opt); if (!r.ok) { let t = await r.text();
+// The build this page belongs to (filled in by the server). A response from a different
+// build means the server was restarted or upgraded: reload rather than misread its API.
+const BUILD = "__ZESUS_BUILD__";
+function checkBuild(b) {
+  if (!b || b === BUILD || checkBuild.done) return;
+  checkBuild.done = true;
+  if (document.querySelector("dialog[open]")) {
+    toast("The Zesus server was restarted or upgraded. Reload the page when you are done here.");
+  } else {
+    location.reload();
+  }
+}
+const api = async (p, opt) => { const r = await fetch(p, opt); checkBuild(r.headers.get("X-Zesus-Build"));
+  if (!r.ok) { let t = await r.text();
   try { t = JSON.parse(t).detail || t; } catch (e) {} throw new Error(t); } return r.json(); };
 const post = (p, body) => api(p, {method: "POST", headers: {"content-type": "application/json"}, body: JSON.stringify(body)});
 const gib = n => n == null ? "?" : n >= 2**40 ? (n/2**40).toFixed(2)+" TiB" : n >= 2**30 ? (n/2**30).toFixed(1)+" GiB" : n >= 2**20 ? (n/2**20).toFixed(1)+" MiB" : n >= 1024 ? (n/1024).toFixed(1)+" KiB" : n+" B";
@@ -502,8 +515,10 @@ function progressHtml(p, running) {
       ${rate(p) ? ` · ${rate(p)}` : ""} · elapsed ${dur(p.total_elapsed_s ?? p.elapsed_s)}${running && p.eta_s != null ? ` · <b>ETA ${dur(p.eta_s)}</b>` : ""}
       ${p.message ? `<br><span class="mono">${esc(p.message)}</span>` : ""}</div>`;
 }
+let JOBS = null;         // last job list, pushed by the server (or polled)
 async function renderJobs() {
-  let d; try { d = await api("/api/jobs"); } catch (e) { return; }
+  let d = JOBS;
+  if (!d) { try { d = JOBS = await api("/api/jobs"); } catch (e) { return; } }
   const ext = d.external.map(p => `<div class="job"><div class="head">${badge(p.stale ? "stale" : p.state)} <b>Scan in another process</b>
       <span class="muted">process ${p.pid}${p.stale ? " — no update for over 2 minutes (stopped?)" : ""}</span></div>
       ${progressHtml(p, p.state === "running" && !p.stale)}${p.state === "running" && !p.stale ? '<div class="note">Cancel it with Ctrl-C in its terminal; it resumes where it stopped.</div>' : ""}</div>`).join("");
@@ -515,23 +530,36 @@ async function renderJobs() {
       ${j.message ? `<div>${esc(j.message)}</div>` : ""}
       ${j.log && j.log.length ? `<pre class="log">${esc(j.log.join("\n"))}</pre>` : ""}
       ${(j.outputs || []).slice(0, 20).map(o => `<div class="mono">${badge(o.cancelled ? "cancelled" : o.status)} ${esc(o.path)} ${o.lost_bytes ? "(" + gib(o.lost_bytes) + " lost)" : ""}</div>`).join("")}
-      ${j.n_outputs > 20 ? `<div class="muted">… and ${j.n_outputs - 20} more (see manifest.json)</div>` : ""}</div>`; }).join("");
+      ${(j.outputs || []).length > 20 ? `<div class="muted">… and more (see manifest.json)</div>` : ""}</div>`; }).join("");
   $("#jobs").innerHTML = `<div class="card"><h2>Jobs</h2>${ext + mine || '<div class="empty">No jobs yet. Run a scan from Overview, or extract from Volumes or Files.</div>'}</div>`;
 }
 async function cancelJob(id) {
   if (!confirm("Cancel this job? Scans resume where they stopped; a cancelled extraction keeps what it wrote and records the rest as gaps.")) return;
-  try { await post(`/api/jobs/${id}/cancel`, {}); renderJobs(); } catch (e) { toast(e.message); }
+  try { await post(`/api/jobs/${id}/cancel`, {}); toast("Cancelling: the job stops at the next safe point."); } catch (e) { toast(e.message); }
 }
-async function pollJobs() {
-  let active = 0;
-  try { const d = await api("/api/jobs");
-    active = d.jobs.filter(j => j.state === "running" || j.state === "queued").length + d.external.filter(p => p.state === "running" && !p.stale).length;
-    const c = $("#jobCount"); c.hidden = !active; c.textContent = active;
-    if ($("#jobs").classList.contains("active")) renderJobs();
-    if (pollJobs.last && !active && pollJobs.last !== active) load();   // a job finished: refresh the map views
-    pollJobs.last = active;
-  } catch (e) {}
-  setTimeout(pollJobs, active ? 1000 : 5000);
+function onJobs(d) {
+  JOBS = d;
+  checkBuild(d.build);
+  const active = d.jobs.filter(j => j.state === "running").length + d.external.filter(p => p.state === "running" && !p.stale).length;
+  const c = $("#jobCount"); c.hidden = !active; c.textContent = active;
+  if ($("#jobs").classList.contains("active")) renderJobs();
+  if (onJobs.last && !active) load();          // a job finished: refresh the map views
+  onJobs.last = active;
+}
+// Job updates are pushed by the server (server-sent events); polling is the fallback.
+function pollJobs() {
+  if (window.EventSource) {
+    const es = new EventSource("/api/stream");
+    es.addEventListener("hello", e => checkBuild(JSON.parse(e.data).build));
+    es.addEventListener("jobs", e => onJobs(JSON.parse(e.data)));
+    es.onerror = () => { /* the browser reconnects by itself; a restarted server says hello with a new build */ };
+    return;
+  }
+  (async function poll() {
+    let active = 0;
+    try { const d = await api("/api/jobs"); onJobs(d); active = onJobs.last; } catch (e) {}
+    setTimeout(poll, active ? 1000 : 5000);
+  })();
 }
 
 async function renderEvents() {
