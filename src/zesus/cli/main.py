@@ -175,6 +175,35 @@ def cmd_members(args: argparse.Namespace) -> int:
     return 0 if all(r.readable for r in reports) else 2
 
 
+def cmd_losses(args: argparse.Namespace) -> int:
+    from ..losses import build_report, markdown, to_json
+    from ..map.db import MapDB
+    logsetup.setup(args.verbose)
+    db = MapDB(args.map, readonly=True)
+    pool, ss = None, None
+    if args.evidence is not None:
+        from ..evidence import EvidenceError, open_evidence, pool_for_map
+        try:
+            ss = open_evidence(db, args.evidence)
+            pool = pool_for_map(db, ss)
+        except EvidenceError as exc:
+            raise SystemExit(str(exc)) from exc
+    try:
+        rep = build_report(db, pool, args.fs)
+    finally:
+        if ss is not None:
+            ss.close()
+    text = to_json(rep) if args.json else markdown(rep, ranges=not args.no_ranges)
+    if args.out:
+        from ..io import guard
+        guard.assert_not_protected([Path(args.out)])
+        Path(args.out).write_text(text + "\n", encoding="utf-8", newline="\n")
+        log.info("written to %s", args.out)
+    else:
+        print(text)
+    return 0
+
+
 def cmd_info(args: argparse.Namespace) -> int:
     from ..map.db import MapDB
     from .report import print_info
@@ -226,6 +255,17 @@ def build_parser() -> argparse.ArgumentParser:
     cb.add_argument("--mapfile", action="append", default=[], metavar="IMAGE=MAPFILE",
                     help="ddrescue mapfile of a member image: its unrescued ranges are taken from other members")
     cb.set_defaults(func=cmd_combine)
+    lo = sub.add_parser("losses", help="list lost and damaged files, and whether carving or a missing disk "
+                                       "could recover more")
+    lo.add_argument("map")
+    lo.add_argument("--fs", type=int, help="only this filesystem (see extract --list)")
+    lo.add_argument("--evidence", nargs="*", metavar="IMAGE",
+                    help="also check each lost block against the evidence: could a missing member help? "
+                         "With no images, the ones recorded in the map are used")
+    lo.add_argument("--json", action="store_true")
+    lo.add_argument("--no-ranges", action="store_true", help="omit the zero-filled byte ranges")
+    lo.add_argument("-o", "--out", help="write the report to this file instead of printing it")
+    lo.set_defaults(func=cmd_losses)
     i = sub.add_parser("info", help="summarize a map")
     i.add_argument("map")
     i.set_defaults(func=cmd_info)

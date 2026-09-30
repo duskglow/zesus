@@ -310,8 +310,26 @@ async function renderVolumes() {
     ${fss.map(f => `<p>Filesystem <b>${esc(f.fstype)}</b> ${esc(f.label||"")} <span class="mono muted">${esc(f.uuid||"")}</span> — ${esc(f.state)}
       ${f.plugin ? ` · <a onclick="tab('files'); selectFs(${f.id})">browse files</a>` : ""}</p>`).join("")}
     <p><a onclick="openExtract({kind:'volume',volume_id:${v.id}}, 'whole volume ${esc(v.name)}')">Extract whole volume image…</a></p></div>`;
-  }).join("");
+  }).join("") + '<div id="lossCard"></div>';
   for (const v of OV.volumes) drawCoverage(v.id);
+  renderLosses();
+}
+
+async function renderLosses() {
+  let r; try { r = await api("/api/losses"); } catch (e) { return; }
+  const verdict = {no: "no", yes: "yes", maybe: "possibly", done: "already done"};
+  const none = r.files.filter(f => f.status === "none"), part = r.files.filter(f => f.status === "partial");
+  const rng = f => f.ranges.slice(0, 6).map(([o, n]) => `0x${o.toString(16)}+0x${n.toString(16)}`).join(", ")
+    + (f.ranges.length > 6 ? ` … (${f.ranges.length} ranges)` : "");
+  $("#lossCard").innerHTML = `<div class="card"><h2>Affected files</h2>
+    <p>${r.files.length ? `<b>${r.files.length}</b> file(s) affected: ${none.length} unrecoverable, ${part.length} partial,
+      ${gib(r.files.reduce((a, f) => a + f.lost_bytes, 0))} lost in total.` : "No file is affected: everything inventoried is fully recoverable."}</p>
+    ${r.files.length ? `<div class="tablewrap"><table><tr><th>Status</th><th>File</th><th class="num">Size</th><th class="num">Lost</th><th class="hide-sm">Zero-filled ranges</th></tr>
+      ${r.files.map(f => `<tr><td>${badge(f.status)}</td><td class="mono">${esc(f.path)}</td><td class="num">${gib(f.size)}</td>
+        <td class="num">${gib(f.lost_bytes)}</td><td class="mono muted hide-sm">${f.status === "partial" ? esc(rng(f)) : "whole file"}</td></tr>`).join("")}</table></div>` : ""}
+    ${r.carve.map(c => `<p><b>Could carving recover more of ${esc(c.volume)}? ${verdict[c.worth_it]}.</b>
+      <span class="muted">${c.reasons.map(x => esc(x[0].toUpperCase() + x.slice(1)) + ".").join(" ")}</span></p>`).join("")}
+    <p class="note">For whether a missing member disk could help, run <span class="mono">zesus losses MAP --evidence</span>.</p></div>`;
 }
 
 async function drawCoverage(id) {

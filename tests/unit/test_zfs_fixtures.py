@@ -221,3 +221,29 @@ def test_mirror_combined_strategy_uses_the_healthy_copy(name, unpacked, tmp_path
     scan([res.path], mapfile, "history,datasets,reconstruct,verify")
     img, info = extract_volume(mapfile, [res.path], "vol", tmp_path / "out")
     assert info["status"] == "full" and img.read_bytes()[:len(content(m, "vol"))] == content(m, "vol")
+
+
+@pytest.mark.parametrize("name", [n for n in POOLS if n.startswith("raidz1")] or ["(no raidz1 fixture)"])
+def test_losses_report_names_blocks_a_missing_disk_could_restore(name, unpacked, tmp_path):
+    from zesus.evidence import open_evidence, pool_for_map
+    from zesus.losses import build_report, markdown
+    from zesus.map.db import MapDB
+    paths = unpacked(name)
+    mapfile = tmp_path / "m.sqlite"
+    scan(paths, mapfile, "history,datasets,reconstruct")      # mapped with every member...
+    scan(paths[2:], mapfile, "verify")                          # ...verified with two raidz1 members gone
+    db = MapDB(mapfile, readonly=True)
+    ss = open_evidence(db, [str(p) for p in paths[2:]])
+    try:
+        rep = build_report(db, pool_for_map(db, ss))
+    finally:
+        ss.close()
+    vol = next(v for v in rep.volumes if v["name"].endswith("/vol"))
+    assert vol["lost"] > 0
+    carve = next(c for c in rep.carve if c.volume.endswith("/vol"))
+    assert carve.worth_it == "no"                 # the ring reaches the live zvol's final state
+    if "lost_birth_max" in carve.facts:
+        assert carve.facts["lost_birth_max"] <= carve.facts["newest_root_txg"]
+    assert rep.members_checked and "absent" in rep.member_note
+    text = markdown(rep)
+    assert "Could carving recover more?" in text and "no." in text

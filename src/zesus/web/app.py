@@ -177,6 +177,17 @@ def create_app(map_path: str, source: str | list[str] | None = None):
         return {"entry": e[0], "extents": rows("SELECT * FROM fs_extents WHERE entry_id=? ORDER BY file_offset "
                                                "LIMIT 2000", (eid,))}
 
+    @app.get("/api/losses")
+    def losses() -> dict:
+        """Affected files (with zero-filled ranges) and whether carving could recover more.
+        Map only; `zesus losses --evidence` adds the per-block missing-member check."""
+        from ..losses import build_report
+        d = db()
+        try:
+            return build_report(d).as_dict()
+        finally:
+            d.close()
+
     @app.get("/api/events")
     def events(limit: int = 200) -> list[dict]:
         return rows("SELECT * FROM events ORDER BY id DESC LIMIT ?", (limit,))
