@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "zesus"
-version = "0.1.0a1"
+version = "0.2.0a1"
 description = "Forensic scanner and extractor for ZFS pools, including destroyed datasets and zvols"
 readme = "README.md"
 license = "Apache-2.0"

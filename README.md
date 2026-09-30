@@ -6,8 +6,9 @@ Zesus is a forensic scanner and extractor for ZFS pools. It can recover **destro
 zvols**, including ones that have fallen off the uberblock ring where
 `zpool import -T <txg>` can no longer reach them.
 
-> **Status: alpha.** It has been validated on real pools (single-disk vdevs, OpenZFS 2.x).
-> The map format may still change before 1.0.
+> **Status: alpha, semi-maintained.** It has been validated on real pools (a single-disk
+> pool and a degraded 4-wide RAIDZ1, OpenZFS 2.x). The map format may still change before
+> 1.0. No new features are planned, but pull requests are reviewed and issues are answered.
 
 ## How it works
 

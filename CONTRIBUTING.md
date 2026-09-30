@@ -3,6 +3,13 @@
 Thanks for helping. Data recovery tools are only as good as the formats and failure
 cases they have seen.
 
+## Project status
+
+Zesus is semi-maintained. The author is no longer developing it actively, but reviews
+pull requests and answers issues. Well-tested fixes and new plugins (filesystems,
+partition schemes) are the most likely to be merged; the open items in
+[CLAUDE.md](CLAUDE.md) are good starting points.
+
 ## Setup
 
 ```bash

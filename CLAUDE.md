@@ -106,17 +106,21 @@ For fast iteration on a big image, use a small slice:
 
 ## Status and next steps
 
+The project is **semi-maintained** from 0.2.0a1: no active feature work, but pull requests
+are reviewed. The open items below are for contributors.
+
 Validated end to end on a real 1 TB single-disk pool:
 * A destroyed 880 GiB zvol (GPT + ext4) was rebuilt from 1,202 carved tree generations.
 * Carved-only and ring+carved reconstructions matched slot for slot.
 * Extracted files passed independent integrity checks.
 
-Multi-disk (v2), validated so far:
+Multi-disk (v2), validated:
 * RAIDZ math: an independent reference, every erasure pattern (p = 1..3), and synthetic
   member disks (`tests/unit/test_raidz_*.py`).
 * A real 16 TB, 4-wide RAIDZ1 pool with one member missing: the history and datasets phases
   found the destroyed zvol. 51k data blocks verified, 72% of them rebuilt from parity.
-  900 MiB extracted, with its GPT CRCs intact.
+  The full recovery followed: 982,716 files extracted, sent back and verified by SHA-256
+  on the destination.
 * Single-disk maps and extractions are byte-identical to v1.
 * Real OpenZFS mirror and RAIDZ1/2/3 pools (`tests/fixtures/zfs`, built by
   `dev/make_zfs_fixtures.sh`; in WSL it needs `zfs-dkms` and runs on loop devices):
