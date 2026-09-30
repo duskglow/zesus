@@ -6,8 +6,9 @@ Zesus is a forensic scanner and extractor for ZFS pools. It can recover **destro
 zvols**, including ones that have fallen off the uberblock ring where
 `zpool import -T <txg>` can no longer reach them.
 
-> **Status: alpha.** It has been validated on real pools (single-disk vdevs, OpenZFS 2.x).
-> The map format may still change before 1.0.
+> **Status: alpha, semi-maintained.** It has been validated on real pools (a single-disk
+> pool and a degraded 4-wide RAIDZ1, OpenZFS 2.x). The map format may still change before
+> 1.0. No new features are planned, but pull requests are reviewed and issues are answered.
 
 ## How it works
 
@@ -77,10 +78,16 @@ zesus extract case.sqlite /dev/sdb -o out/ --fs 1 --path '/home/*' # selected fi
 #     permissions, times and, with --sudo, owners)
 zesus send case.sqlite /dev/sdb --fs 1 --path /home --to root@server:/ --sudo --dry-run
 
-# 4. Write a recovery report: what was found, what is lost and why (Markdown + per-file CSV)
+# 4. What is lost, exactly, and could anything more bring it back?
+zesus losses case.sqlite
+#    Or the full recovery report: what was found, what is lost and why (Markdown + per-file CSV)
 zesus report case.sqlite -o case-report.md
 
-# 5. Or browse in a local web UI
+# Multi-disk pools: give one image per member disk, in any order
+zesus members sda.img sdb.img sdc.img sdd.img       # which is which, what is missing, can it be read
+zesus scan sda.img sdb.img sdc.img sdd.img -o case.sqlite
+
+# 5. Or browse in a local web UI (scans, extraction, progress and cancel)
 zesus web case.sqlite --source /dev/sdb       # http://127.0.0.1:8765/
 ```
 
@@ -94,7 +101,7 @@ Keep the map and the outputs on a **different disk** from the evidence.
 
 | Area | Status |
 |---|---|
-| Vdevs | single disk / file, mirror. RAIDZ/dRAID: detected, reported as unsupported |
+| Vdevs | single disk / file, mirror, RAIDZ1/2/3 (one image per member disk; up to *nparity* members may be missing). dRAID and expanded RAIDZ: detected, reported as unsupported |
 | Features | lz4, gzip, zle, lzjb, zstd; fletcher2/4, sha256, sha512, blake3; embedded data; gang blocks; large dnodes; hole_birth |
 | Encryption | detected and reported; decryption not implemented |
 | Partition tables | GPT (with backup-header fallback), MBR with logical partitions |
@@ -104,6 +111,25 @@ Keep the map and the outputs on a **different disk** from the evidence.
 
 New filesystems are plugins and need no change to core code. See
 [docs/writing-plugins.md](docs/writing-plugins.md) and `examples/plugin-template/`.
+
+## Let Claude do the recovery
+
+Zesus ships with a [Claude Code](https://claude.com/claude-code) skill,
+[`.claude/skills/zfs-recovery`](.claude/skills/zfs-recovery/SKILL.md), that turns Claude
+into the recovery operator. You point it at your disk images and make the decisions;
+Claude:
+* identifies the member disks;
+* scans the images;
+* reports in plain language what can and cannot be recovered;
+* copies the data where you say, and checks the copy by hash before telling you the
+  source can be released.
+
+The skill carries the rules Claude works under: the evidence is read-only, file contents
+stay private, and nothing leaves the machine without your say-so.
+
+Run Claude Code from a checkout of this repository, or copy the skill folder into
+`~/.claude/skills/`, and ask something like *"recover the destroyed zvol from these four
+disk images"*.
 
 ## Documentation
 

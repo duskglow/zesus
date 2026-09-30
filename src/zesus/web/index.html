@@ -8,22 +8,25 @@
 :root {
   --bg: #f7f7f5; --panel: #ffffff; --text: #1d1f21; --muted: #6b7075; --border: #e2e2de;
   --accent: #2f6fdb; --ok: #2e9d57; --stale: #84b84a; --hole: #d9dcd6; --warn: #d8911c; --bad: #d23f3f;
-  --unknown: #9aa3ad; --mono: ui-monospace, SFMono-Regular, Consolas, monospace;
+  --unknown: #9aa3ad; --mono: ui-monospace, SFMono-Regular, Consolas, monospace; --sel: #e8f0fe;
 }
 @media (prefers-color-scheme: dark) {
   :root { --bg: #15171a; --panel: #1d2024; --text: #e6e6e3; --muted: #9aa0a6; --border: #2d3136;
-          --accent: #6ea0ff; --hole: #3a3f45; }
+          --accent: #6ea0ff; --hole: #3a3f45; --sel: #22304a; }
 }
 * { box-sizing: border-box; }
 body { margin: 0; background: var(--bg); color: var(--text); font: 14px/1.45 system-ui, sans-serif; }
 header { display: flex; align-items: baseline; gap: 16px; padding: 14px 20px; border-bottom: 1px solid var(--border);
-         background: var(--panel); position: sticky; top: 0; z-index: 2; flex-wrap: wrap; }
+         background: var(--panel); position: sticky; top: 0; z-index: 3; flex-wrap: wrap; }
 header h1 { font-size: 16px; margin: 0; }
 header .src { color: var(--muted); font: 12px var(--mono); overflow-wrap: anywhere; }
 nav { display: flex; gap: 4px; margin-left: auto; }
 nav button { background: none; border: 1px solid transparent; color: var(--muted); padding: 5px 10px; border-radius: 6px;
              cursor: pointer; font: inherit; }
 nav button.active { color: var(--text); border-color: var(--border); background: var(--bg); }
+nav .count { display: inline-block; min-width: 18px; padding: 0 5px; border-radius: 999px; background: var(--accent);
+             color: #fff; font-size: 11px; margin-left: 4px; }
+[hidden] { display: none !important; }
 main { padding: 20px; max-width: 1300px; margin: 0 auto; }
 section { display: none; } section.active { display: block; }
 .card { background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 16px; margin-bottom: 16px; }
@@ -36,42 +39,74 @@ table { width: 100%; border-collapse: collapse; font-variant-numeric: tabular-nu
 th, td { text-align: left; padding: 6px 8px; border-bottom: 1px solid var(--border); vertical-align: top; }
 th { color: var(--muted); font-weight: 500; font-size: 12px; }
 td.num, th.num { text-align: right; }
+td.cb, th.cb { width: 28px; }
+tr.selected td { background: var(--sel); }
 .tablewrap { overflow-x: auto; }
-.badge { display: inline-block; padding: 1px 8px; border-radius: 999px; font-size: 12px; color: #fff; }
-.b-full, .b-ok, .b-present, .b-verified, .b-done, .b-inventoried { background: var(--ok); }
-.b-running, .b-queued, .b-mapped { background: var(--accent); } .b-failed { background: var(--bad); } .b-partial, .b-ok_stale { background: var(--warn); }
-.b-none, .b-destroyed, .b-cksum_mismatch, .b-no_metadata, .b-zeroed { background: var(--bad); }
+.badge { display: inline-block; padding: 1px 8px; border-radius: 999px; font-size: 12px; color: #fff; white-space: nowrap; }
+.b-full, .b-ok, .b-present, .b-verified, .b-done, .b-inventoried, .b-intact { background: var(--ok); }
+.b-running, .b-queued, .b-mapped { background: var(--accent); } .b-failed { background: var(--bad); }
+.b-partial, .b-ok_stale, .b-cancelled, .b-stale, .b-duplicate, .b-degraded { background: var(--warn); }
+.b-none, .b-destroyed, .b-cksum_mismatch, .b-no_metadata, .b-zeroed, .b-missing { background: var(--bad); }
 .b-na, .b-hole, .b-unknown { background: var(--unknown); }
 .mono { font-family: var(--mono); font-size: 12px; }
 .muted { color: var(--muted); }
+.warn { color: var(--warn); } .bad { color: var(--bad); }
 canvas { width: 100%; height: 90px; border-radius: 6px; display: block; background: var(--hole); }
 .legend { display: flex; gap: 14px; flex-wrap: wrap; font-size: 12px; margin-top: 8px; color: var(--muted); }
 .legend i { display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin-right: 5px; vertical-align: -1px; }
 .crumbs a, a { color: var(--accent); text-decoration: none; cursor: pointer; }
 input, select { font: inherit; padding: 6px 8px; border: 1px solid var(--border); border-radius: 6px; background: var(--bg);
                 color: var(--text); }
+input[type=checkbox] { width: 16px; height: 16px; padding: 0; vertical-align: -3px; }
 button.primary { background: var(--accent); color: #fff; border: 0; padding: 7px 12px; border-radius: 6px; cursor: pointer; font: inherit; }
-.row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-bottom: 10px; }
-.empty { color: var(--muted); padding: 20px 0; text-align: center; }
+button.primary:disabled { opacity: .5; cursor: default; }
 button.ghost { background: none; border: 1px solid var(--border); color: var(--text); padding: 6px 10px;
                border-radius: 6px; cursor: pointer; font: inherit; }
+button.danger { background: none; border: 1px solid var(--bad); color: var(--bad); padding: 4px 10px; border-radius: 6px;
+                cursor: pointer; font: inherit; }
+.row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-bottom: 10px; }
+.empty { color: var(--muted); padding: 20px 0; text-align: center; }
 .form { display: grid; gap: 8px; margin: 10px 0; }
 .form label { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
 .form label.chk { color: var(--muted); }
 pre.log { background: var(--bg); border: 1px solid var(--border); border-radius: 6px; padding: 8px; max-height: 180px;
           overflow: auto; font: 12px var(--mono); white-space: pre-wrap; margin: 6px 0 0; }
-@media (max-width: 640px) { main { padding: 12px; } nav { margin-left: 0; width: 100%; overflow-x: auto; } }
+.bar { height: 10px; border-radius: 999px; background: var(--hole); overflow: hidden; margin: 6px 0 4px; }
+.bar > i { display: block; height: 100%; background: var(--accent); transition: width .5s; }
+.bar.indet > i { width: 30% !important; animation: slide 1.4s infinite linear; }
+@keyframes slide { from { margin-left: -30%; } to { margin-left: 100%; } }
+.job { border-top: 1px solid var(--border); padding: 12px 0; }
+.job:first-of-type { border-top: 0; }
+.job .head { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+.job .meta { color: var(--muted); font-size: 12px; font-variant-numeric: tabular-nums; }
+#tray { position: sticky; bottom: 0; z-index: 2; display: none; gap: 10px; align-items: center; flex-wrap: wrap;
+        background: var(--panel); border: 1px solid var(--accent); border-radius: 10px; padding: 10px 14px; margin-top: 12px;
+        box-shadow: 0 -4px 14px rgba(0,0,0,.08); }
+#tray.on { display: flex; }
+dialog { border: 1px solid var(--border); border-radius: 12px; background: var(--panel); color: var(--text);
+         width: min(640px, calc(100vw - 32px)); padding: 18px; }
+dialog::backdrop { background: rgba(0,0,0,.35); }
+dialog h2 { font-size: 16px; margin: 0 0 8px; }
+.est { display: grid; grid-template-columns: repeat(auto-fit, minmax(130px, 1fr)); gap: 8px; margin: 10px 0; }
+.est div { border: 1px solid var(--border); border-radius: 8px; padding: 8px 10px; }
+.est b { display: block; font-size: 16px; font-variant-numeric: tabular-nums; }
+.est span { color: var(--muted); font-size: 12px; }
+.note { font-size: 12px; color: var(--muted); }
+#toast { position: fixed; bottom: 16px; left: 50%; transform: translateX(-50%); background: var(--text); color: var(--bg);
+         padding: 8px 14px; border-radius: 8px; font-size: 13px; display: none; z-index: 10; max-width: 90vw; }
+@media (max-width: 640px) { main { padding: 12px; } nav { margin-left: 0; width: 100%; overflow-x: auto; }
+  .hide-sm { display: none; } }
 </style>
 </head>
 <body>
 <header>
-  <h1>Zesus <span class="muted" style="font-weight:400">ZFS Emergency Storage Undelete Support</span></h1>
+  <h1>Zesus <span class="muted hide-sm" style="font-weight:400">ZFS Emergency Storage Undelete Support</span></h1>
   <span class="src" id="src"></span>
   <nav>
     <button data-tab="overview" class="active">Overview</button>
     <button data-tab="volumes">Volumes</button>
     <button data-tab="files">Files</button>
-    <button data-tab="jobs">Extraction</button>
+    <button data-tab="jobs">Jobs<span class="count" id="jobCount" hidden></span></button>
     <button data-tab="events">Log</button>
   </nav>
 </header>
@@ -81,16 +116,23 @@ pre.log { background: var(--bg); border: 1px solid var(--border); border-radius:
   <section id="files">
     <div class="card">
       <div class="row">
-        <select id="fsSel"></select>
-        <input id="q" placeholder="Search paths…" size="28">
-        <select id="st"><option value="">any status</option><option>full</option><option>partial</option><option>none</option></select>
+        <select id="fsSel" aria-label="Filesystem"></select>
+        <input id="q" placeholder="Search paths…" size="28" aria-label="Search paths">
+        <select id="st" aria-label="Status filter"><option value="">any status</option><option>full</option><option>partial</option><option>none</option></select>
         <button class="primary" id="searchBtn">Search</button>
       </div>
       <div class="row" style="justify-content:space-between">
         <div class="crumbs mono" id="crumbs"></div>
-        <button id="sendDirBtn" class="ghost">Send this folder…</button>
+        <span class="note">Tick files or folders to extract several at once. A ticked folder includes everything under it.</span>
       </div>
       <div class="tablewrap"><table id="listing"></table></div>
+      <div id="tray">
+        <b id="trayCount"></b><span class="muted" id="traySize"></span>
+        <button class="primary" id="trayExtract">Extract…</button>
+        <button class="ghost" id="traySend">Send…</button>
+        <button class="ghost" id="trayShow">Show</button>
+        <button class="ghost" id="trayClear">Clear</button>
+      </div>
     </div>
     <div class="card" id="sendPanel" hidden>
       <h2>Send back with rsync</h2>
@@ -115,18 +157,69 @@ pre.log { background: var(--bg); border: 1px solid var(--border); border-radius:
   <section id="jobs"></section>
   <section id="events"></section>
 </main>
+
+<dialog id="exDlg">
+  <h2 id="exTitle">Extract</h2>
+  <div class="muted" id="exWhat"></div>
+  <div class="est" id="exEst"><div><b>…</b><span>estimating</span></div></div>
+  <div class="form">
+    <label>Output directory <input id="exOut" size="40" placeholder="D:\recovered" spellcheck="false"></label>
+    <div class="note" id="exOutNote"></div>
+    <div id="exStatusRow" class="row" style="margin:0">
+      <span class="muted">Files to include:</span>
+      <label class="chk"><input type="checkbox" class="exSt" value="full" checked> fully recoverable</label>
+      <label class="chk"><input type="checkbox" class="exSt" value="partial" checked> partial</label>
+      <label class="chk"><input type="checkbox" class="exSt" value="none"> unrecoverable (empty placeholders)</label>
+    </div>
+    <label>Unrecoverable ranges <select id="exFill"><option value="zero">leave zero-filled</option>
+      <option value="pattern">fill with a visible marker</option></select></label>
+    <label class="chk"><input type="checkbox" id="exForce"> overwrite existing outputs</label>
+    <label class="chk" id="exHashRow"><input type="checkbox" id="exHash"> compute the SHA-256 of the image (reads the whole image again when done)</label>
+  </div>
+  <p class="note">Every block is re-verified against its checksum while extracting. Gaps are never hidden: they are
+    listed in <span class="mono">*.gaps.json</span> and <span class="mono">manifest.json</span>.</p>
+  <div class="row" style="justify-content:flex-end;margin:0">
+    <button class="ghost" id="exCancel">Cancel</button>
+    <button class="primary" id="exGo">Start extraction</button>
+  </div>
+</dialog>
+<div id="toast" role="status"></div>
+
 <script>
 const $ = s => document.querySelector(s);
 const esc = s => String(s ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
-const api = async (p, opt) => { const r = await fetch(p, opt); if (!r.ok) throw new Error(await r.text()); return r.json(); };
-const gib = n => n == null ? "?" : n >= 2**30 ? (n/2**30).toFixed(1)+" GiB" : n >= 2**20 ? (n/2**20).toFixed(1)+" MiB" : n >= 1024 ? (n/1024).toFixed(1)+" KiB" : n+" B";
+// The build this page belongs to (filled in by the server). A response from a different
+// build means the server was restarted or upgraded: reload rather than misread its API.
+const BUILD = "__ZESUS_BUILD__";
+function checkBuild(b) {
+  if (!b || b === BUILD || checkBuild.done) return;
+  checkBuild.done = true;
+  if (document.querySelector("dialog[open]")) {
+    toast("The Zesus server was restarted or upgraded. Reload the page when you are done here.");
+  } else {
+    location.reload();
+  }
+}
+const api = async (p, opt) => { const r = await fetch(p, opt); checkBuild(r.headers.get("X-Zesus-Build"));
+  if (!r.ok) { let t = await r.text();
+  try { t = JSON.parse(t).detail || t; } catch (e) {} throw new Error(t); } return r.json(); };
+const post = (p, body) => api(p, {method: "POST", headers: {"content-type": "application/json", "x-zesus-request": "1"}, body: JSON.stringify(body)});
+const gib = n => n == null ? "?" : n >= 2**40 ? (n/2**40).toFixed(2)+" TiB" : n >= 2**30 ? (n/2**30).toFixed(1)+" GiB" : n >= 2**20 ? (n/2**20).toFixed(1)+" MiB" : n >= 1024 ? (n/1024).toFixed(1)+" KiB" : n+" B";
 const ts = t => t ? new Date(t*1000).toLocaleString() : "?";
 const pct = (a, n) => n ? (100*a/n).toFixed(2)+"%" : "–";
-const badge = s => `<span class="badge b-${esc((s||"na").replace("/",""))}">${esc(s||"n/a")}</span>`;
+const dur = s => s == null || !isFinite(s) ? "?" : s >= 86400 ? `${Math.floor(s/86400)}d ${Math.floor(s%86400/3600)}h` :
+  s >= 3600 ? `${Math.floor(s/3600)}h ${String(Math.floor(s%3600/60)).padStart(2,"0")}m` : s >= 60 ? `${Math.floor(s/60)}m ${String(Math.floor(s%60)).padStart(2,"0")}s` : `${Math.floor(s)}s`;
+const rate = p => !p || !p.rate ? "" : p.unit === "bytes" ? `${(p.rate/1e6).toFixed(0)} MB/s` : `${p.rate.toFixed(0)} ${p.unit}/s`;
+const badge = s => `<span class="badge b-${esc((s||"na").replace(/[^a-z_]/gi,""))}">${esc(s||"n/a")}</span>`;
 const COLORS = {ok:"--ok", ok_stale:"--stale", embedded:"--ok", hole:"--hole", discarded:"--hole", unknown:"--unknown",
                 cksum_mismatch:"--bad", zeroed:"--warn", no_metadata:"--bad", unreadable:"--bad", decompress_fail:"--bad"};
 const css = v => getComputedStyle(document.documentElement).getPropertyValue(v).trim();
+const store = {get: (k, d) => { try { return JSON.parse(localStorage.getItem(k)) ?? d; } catch (e) { return d; } },
+               set: (k, v) => { try { localStorage.setItem(k, JSON.stringify(v)); } catch (e) {} }};
 let OV = null, curFs = null;
+function toast(msg) { const t = $("#toast"); t.textContent = msg; t.style.display = "block";
+  clearTimeout(toast.t); toast.t = setTimeout(() => t.style.display = "none", 4000); }
+function tab(name) { document.querySelector(`nav button[data-tab="${name}"]`).click(); }
 
 document.querySelectorAll("nav button").forEach(b => b.onclick = () => {
   document.querySelectorAll("nav button, section").forEach(x => x.classList.remove("active"));
@@ -137,12 +230,15 @@ document.querySelectorAll("nav button").forEach(b => b.onclick = () => {
 
 async function load() {
   OV = await api("/api/overview");
-  $("#src").textContent = `${OV.source || "(no source: browse only)"} · ${OV.map}`;
-  renderOverview(); renderVolumes(); initFiles();
+  $("#src").textContent = `${OV.evidence && OV.evidence.length ? OV.evidence.join(" + ") : "(no evidence: browse only)"} · ${OV.map}`;
+  renderOverview(); renderVolumes();
 }
+async function init() { await load(); initFiles(); pollJobs(); }
 
+// ------------------------------------------------------------------ overview
 function renderOverview() {
   const h = [];
+  if (OV.members) h.push(membersCard(OV.members));
   for (const p of OV.pools) {
     const ok = p.uberblocks.filter(u => u.checksum_ok).length;
     const mos = p.uberblocks.filter(u => u.mos_ok).length;
@@ -157,11 +253,52 @@ function renderOverview() {
   for (const d of OV.datasets) h.push(`<tr><td class="mono">${esc(d.name)}</td><td>${esc(d.kind)}</td><td>${badge(d.status)}</td><td>${esc(d.origin)}</td>
     <td>txg ${d.creation_txg ?? "?"}<br><span class="muted">${ts(d.creation_time)}</span></td>
     <td>${d.destroy_txg ? `txg ${d.destroy_txg}<br><span class="muted">${ts(d.destroy_time)}</span>` : ""}</td></tr>`);
+  if (!OV.datasets.length) h.push(`<tr><td colspan="6" class="empty">No datasets found yet: run the history and datasets phases.</td></tr>`);
   h.push(`</table></div></div>`);
-  h.push(`<div class="card"><h2>Scan progress</h2>${OV.progress.map(p => `<span class="badge b-ok">${esc(p.phase)}</span> <span class="muted">${p.n} unit(s), ${esc(p.last)}</span>`).join("<br>") || '<div class="empty">no phases complete</div>'}</div>`);
+  h.push(scanCard());
   $("#overview").innerHTML = h.join("");
+  const go = $("#scanGo"); if (go) go.onclick = startScan;
 }
 
+function membersCard(m) {
+  const rows = [];
+  for (const t of m.tops) {
+    const geo = t.type === "raidz" ? `RAIDZ${t.nparity}, ${t.width} disks` : t.type;
+    rows.push(`<tr><td colspan="5"><b>vdev ${t.id}</b> · ${esc(geo)} · ashift ${t.ashift} — ${badge(t.readable ? (t.verdict.startsWith("intact") ? "intact" : "degraded") : "failed")}
+      <span class="${t.readable ? "muted" : "bad"}">${esc(t.verdict)}</span></td></tr>`);
+    for (const r of t.members) rows.push(`<tr><td class="num">${r.child ?? "?"}</td><td>${badge(r.state)}</td>
+      <td class="mono">${esc(r.file || "—")}</td><td class="mono muted">${esc(r.devid || r.config_path)}</td><td class="muted">${esc(r.note || "")}</td></tr>`);
+  }
+  return `<div class="card"><h2>Member disks</h2><div class="tablewrap"><table>
+    <tr><th class="num">Child</th><th>State</th><th>Evidence file</th><th>Original device</th><th>Note</th></tr>${rows.join("")}</table></div>
+    <p class="note">${m.readable ? "Every block can be read or rebuilt from parity. Rebuilt blocks are accepted only if they match their checksum."
+      : "Some data cannot be read: more members are missing than parity can replace."}</p></div>`;
+}
+
+function scanCard() {
+  const phases = ["history", "datasets", "carve", "reconstruct", "verify", "contents"];
+  const done = new Set(OV.progress.filter(p => p.complete).map(p => p.phase));
+  const can = OV.evidence && OV.evidence.length;
+  return `<div class="card"><h2>Scan</h2>
+    <p class="muted">Phases run in order and resume where they stopped. Carving reads every sector of every member disk and is
+      by far the longest; it can be cancelled and resumed at any time.</p>
+    <div class="row">${phases.map(p => `<label class="chk"><input type="checkbox" class="scanPh" value="${p}" ${done.has(p) ? "" : "checked"}>
+      ${p} ${done.has(p) ? '<span class="badge b-done">complete</span>' : ""}</label>`).join(" ")}</div>
+    <div class="row"><label class="chk"><input type="checkbox" id="scanRedo"> re-run ticked phases even if complete</label>
+      <label class="muted">limit to first <input id="scanLimit" size="8" placeholder="all"> blocks per volume (testing)</label></div>
+    <div class="row"><button class="primary" id="scanGo" ${can ? "" : "disabled"}>Run selected phases</button>
+      ${can ? "" : '<span class="muted">Start the UI with --source (one per member disk) to run scans.</span>'}</div>
+    <div>${OV.progress.map(p => `${badge(p.complete ? "done" : "partial")} ${esc(p.phase)} <span class="muted">${p.n} unit(s), last ${esc(p.last)}</span>`).join("<br>")}</div></div>`;
+}
+
+async function startScan() {
+  const phases = [...document.querySelectorAll(".scanPh:checked")].map(x => x.value);
+  if (!phases.length) { toast("Tick at least one phase."); return; }
+  const req = {phases, redo: $("#scanRedo").checked ? phases : [], limit_blocks: $("#scanLimit").value.trim() || null};
+  try { await post("/api/scan", req); tab("jobs"); } catch (e) { toast(e.message); }
+}
+
+// ------------------------------------------------------------------ volumes
 async function renderVolumes() {
   const el = $("#volumes");
   if (!OV.volumes.length) { el.innerHTML = '<div class="card empty">No volumes reconstructed yet.</div>'; return; }
@@ -177,16 +314,35 @@ async function renderVolumes() {
       <div class="stat"><div class="v" style="color:var(--bad)">${(v.n_missing||0)+(v.n_damaged||0)}</div><div class="l">blocks lost</div></div>
     </div>
     <p class="muted">Block map, left to right across the volume:</p><canvas id="cov${v.id}" width="1200" height="90"></canvas>
-    <div class="legend">${[["ok","recovered"],["ok_stale","older generation"],["hole","never written"],["zeroed","trimmed"],["cksum_mismatch","overwritten / no metadata"]]
+    <div class="legend">${[["ok","recovered"],["ok_stale","older generation"],["hole","never written"],["zeroed","trimmed"],["cksum_mismatch","overwritten / no metadata"],["unknown","not verified yet"]]
       .map(([k,l]) => `<span><i style="background:var(${COLORS[k]})"></i>${l}</span>`).join("")}</div>
-    ${parts.length ? `<h2 style="margin-top:16px">Partitions</h2><table><tr><th>#</th><th>Type</th><th class="num">Start</th><th class="num">Size</th><th class="num">Recoverable</th><th></th></tr>
+    ${parts.length ? `<h2 style="margin-top:16px">Partitions</h2><div class="tablewrap"><table><tr><th>#</th><th>Type</th><th class="num">Start</th><th class="num">Size</th><th class="num">Recoverable</th><th></th></tr>
       ${parts.map(p => `<tr><td>${p.idx}</td><td>${esc(p.type_name)} ${esc(p.name||"")}</td><td class="num mono">${p.start.toString(16)}</td>
       <td class="num">${gib(p.length)}</td><td class="num">${(100*(p.coverage||0)).toFixed(3)}%</td>
-      <td><a onclick="queue({kind:'partition',partition_id:${p.id}})">extract image</a></td></tr>`).join("")}</table>` : ""}
-    ${fss.map(f => `<p>Filesystem <b>${esc(f.fstype)}</b> ${esc(f.label||"")} <span class="mono muted">${esc(f.uuid||"")}</span> — ${esc(f.state)}</p>`).join("")}
-    <p><a onclick="queue({kind:'volume',volume_id:${v.id}})">Extract whole volume image</a></p></div>`;
-  }).join("");
+      <td><a onclick="openExtract({kind:'partition',partition_id:${p.id}}, 'partition ${p.idx} of ${esc(v.name)}')">extract image…</a></td></tr>`).join("")}</table></div>` : ""}
+    ${fss.map(f => `<p>Filesystem <b>${esc(f.fstype)}</b> ${esc(f.label||"")} <span class="mono muted">${esc(f.uuid||"")}</span> — ${esc(f.state)}
+      ${f.plugin ? ` · <a onclick="tab('files'); selectFs(${f.id})">browse files</a>` : ""}</p>`).join("")}
+    <p><a onclick="openExtract({kind:'volume',volume_id:${v.id}}, 'whole volume ${esc(v.name)}')">Extract whole volume image…</a></p></div>`;
+  }).join("") + '<div id="lossCard"></div>';
   for (const v of OV.volumes) drawCoverage(v.id);
+  renderLosses();
+}
+
+async function renderLosses() {
+  let r; try { r = await api("/api/losses"); } catch (e) { return; }
+  const verdict = {no: "no", yes: "yes", maybe: "possibly", done: "already done"};
+  const none = r.files.filter(f => f.status === "none"), part = r.files.filter(f => f.status === "partial");
+  const rng = f => f.ranges.slice(0, 6).map(([o, n]) => `0x${o.toString(16)}+0x${n.toString(16)}`).join(", ")
+    + (f.ranges.length > 6 ? ` … (${f.ranges.length} ranges)` : "");
+  $("#lossCard").innerHTML = `<div class="card"><h2>Affected files</h2>
+    <p>${r.files.length ? `<b>${r.files.length}</b> file(s) affected: ${none.length} unrecoverable, ${part.length} partial,
+      ${gib(r.files.reduce((a, f) => a + f.lost_bytes, 0))} lost in total.` : "No file is affected: everything inventoried is fully recoverable."}</p>
+    ${r.files.length ? `<div class="tablewrap"><table><tr><th>Status</th><th>File</th><th class="num">Size</th><th class="num">Lost</th><th class="hide-sm">Zero-filled ranges</th></tr>
+      ${r.files.map(f => `<tr><td>${badge(f.status)}</td><td class="mono">${esc(f.path)}</td><td class="num">${gib(f.size)}</td>
+        <td class="num">${gib(f.lost_bytes)}</td><td class="mono muted hide-sm">${f.status === "partial" ? esc(rng(f)) : "whole file"}</td></tr>`).join("")}</table></div>` : ""}
+    ${r.carve.map(c => `<p><b>Could carving recover more of ${esc(c.volume)}? ${verdict[c.worth_it]}.</b>
+      <span class="muted">${c.reasons.map(x => esc(x[0].toUpperCase() + x.slice(1)) + ".").join(" ")}</span></p>`).join("")}
+    <p class="note">For whether a missing member disk could help, run <span class="mono">zesus losses MAP --evidence</span>.</p></div>`;
 }
 
 async function drawCoverage(id) {
@@ -200,24 +356,63 @@ async function drawCoverage(id) {
   });
 }
 
+// ------------------------------------------------------------------ files + selection
+const SEL = new Map();          // path -> {type, size, fs}
+let LIST = [];
 function initFiles() {
   const inv = OV.filesystems.filter(f => f.plugin);
   $("#fsSel").innerHTML = inv.map(f => `<option value="${f.id}">${f.id}: ${esc(f.fstype)} ${esc(f.label||f.uuid||"")}</option>`).join("");
-  if (inv.length) { curFs = inv[0].id; browse("/"); } else $("#listing").innerHTML = '<tr><td class="empty">No inventoried filesystem yet.</td></tr>';
-  $("#fsSel").onchange = e => { curFs = +e.target.value; browse("/"); };
+  if (inv.length) selectFs(inv[0].id); else $("#listing").innerHTML = '<tr><td class="empty">No inventoried filesystem yet.</td></tr>';
+  $("#fsSel").onchange = e => selectFs(+e.target.value);
   $("#searchBtn").onclick = search;
   $("#q").onkeydown = e => { if (e.key === "Enter") search(); };
 }
+function selectFs(id) {
+  if (curFs !== id && SEL.size && !confirm("Switching filesystem clears the current selection. Continue?")) {
+    $("#fsSel").value = curFs; return; }
+  if (curFs !== id) SEL.clear();
+  curFs = id; $("#fsSel").value = id; browse("/"); updateTray();
+}
 
 function rowsHtml(list, showPath) {
+  LIST = list;
   if (!list.length) return '<tr><td class="empty">Empty.</td></tr>';
-  return `<tr><th>Name</th><th class="num">Size</th><th>Modified</th><th>Status</th><th></th></tr>` + list.map(e =>
-    `<tr><td class="mono">${e.type === "dir" ? `<a onclick="browse('${esc(e.path).replace(/'/g,"\\'")}')">${esc(showPath ? e.path : e.name)}/</a>` : esc(showPath ? e.path : e.name)}
+  const all = list.length && list.every(e => SEL.has(e.path));
+  return `<tr><th class="cb"><input type="checkbox" id="selAll" ${all ? "checked" : ""} aria-label="Select all"></th><th>Name</th>
+    <th class="num">Size</th><th class="num hide-sm">Recoverable</th><th class="hide-sm">Modified</th><th>Status</th><th></th></tr>` + list.map((e, i) => {
+    const q = esc(e.path).replace(/'/g,"\\'");
+    const recov = e.type === "file" ? (e.recoverable_bytes == null ? "" : e.size ? pct(e.recoverable_bytes, e.size) : "—") : "";
+    return `<tr class="${SEL.has(e.path) ? "selected" : ""}"><td class="cb"><input type="checkbox" class="selOne" data-i="${i}" ${SEL.has(e.path) ? "checked" : ""} aria-label="Select"></td>
+      <td class="mono">${e.type === "dir" ? `<a onclick="browse('${q}')">${esc(showPath ? e.path : e.name)}/</a>` : esc(showPath ? e.path : e.name)}
       ${e.link_target ? `<span class="muted"> → ${esc(e.link_target)}</span>` : ""}${e.deleted ? ' <span class="badge b-none">deleted</span>' : ""}</td>
-     <td class="num">${e.type === "file" ? gib(e.size) : ""}</td><td class="muted">${ts(e.mtime)}</td><td>${badge(e.status)}</td>
-     <td><a onclick="queue({kind:'files',fs_id:${curFs},paths:['${esc(e.path).replace(/'/g,"\\'")}']})">extract</a>
-       · <a onclick="openSend(['${esc(e.path).replace(/'/g,"\\'")}'])">send</a></td></tr>`).join("");
+     <td class="num">${e.type === "file" ? gib(e.size) : ""}</td><td class="num hide-sm">${recov}</td><td class="muted hide-sm">${ts(e.mtime)}</td><td>${badge(e.status)}</td>
+     <td style="white-space:nowrap"><a onclick="openExtract({kind:'files',fs_id:${curFs},paths:['${q}']}, '${q}')">extract…</a>
+       · <a onclick="openSend(['${q}'])">send</a></td></tr>`; }).join("");
 }
+function wireRows() {
+  const all = $("#selAll");
+  if (all) all.onchange = () => { for (const e of LIST) toggle(e, all.checked); refreshChecks(); };
+  document.querySelectorAll(".selOne").forEach(cb => cb.onchange = () => { toggle(LIST[+cb.dataset.i], cb.checked); refreshChecks(); });
+}
+function toggle(e, on) { if (on) SEL.set(e.path, {type: e.type, size: e.type === "file" ? e.size || 0 : null}); else SEL.delete(e.path); }
+function refreshChecks() {
+  document.querySelectorAll(".selOne").forEach(cb => { const on = SEL.has(LIST[+cb.dataset.i].path);
+    cb.checked = on; cb.closest("tr").classList.toggle("selected", on); });
+  const all = $("#selAll"); if (all) all.checked = LIST.length && LIST.every(e => SEL.has(e.path));
+  updateTray();
+}
+function updateTray() {
+  const n = SEL.size; $("#tray").classList.toggle("on", n > 0);
+  if (!n) return;
+  const files = [...SEL.values()].filter(v => v.type === "file"), dirs = [...SEL.values()].filter(v => v.type === "dir").length;
+  $("#trayCount").textContent = `${n} selected`;
+  $("#traySize").textContent = `${files.length} file(s) ${gib(files.reduce((a, v) => a + v.size, 0))}` + (dirs ? ` + ${dirs} folder(s) with everything inside` : "");
+}
+$("#trayClear").onclick = () => { SEL.clear(); refreshChecks(); };
+$("#trayExtract").onclick = () => openExtract({kind: "files", fs_id: curFs, paths: [...SEL.keys()]}, `${SEL.size} selected item(s)`);
+$("#traySend").onclick = () => openSend([...SEL.keys()]);
+$("#trayShow").onclick = () => { $("#crumbs").textContent = `${SEL.size} selected`;
+  $("#listing").innerHTML = rowsHtml([...SEL.entries()].map(([path, v]) => ({path, name: path, type: v.type, size: v.size})), true); wireRows(); };
 
 let curPath = "/";
 async function browse(path) {
@@ -226,33 +421,67 @@ async function browse(path) {
   const segs = path.split("/").filter(Boolean); let acc = "";
   $("#crumbs").innerHTML = `<a onclick="browse('/')">/</a>` + segs.map(s => { acc += "/" + s;
     return ` <a onclick="browse('${esc(acc).replace(/'/g,"\\'")}')">${esc(s)}</a> /`; }).join("");
-  $("#listing").innerHTML = rowsHtml(d.children, false);
+  $("#listing").innerHTML = rowsHtml(d.children, false); wireRows();
 }
-
 async function search() {
   const q = $("#q").value, st = $("#st").value;
   const d = await api(`/api/fs/${curFs}/search?q=${encodeURIComponent(q)}&status=${st}`);
-  $("#crumbs").textContent = `${d.length} result(s)`;
-  $("#listing").innerHTML = rowsHtml(d, true);
+  $("#crumbs").textContent = `${d.length} result(s)${d.length >= 500 ? " (first 500)" : ""}`;
+  $("#listing").innerHTML = rowsHtml(d, true); wireRows();
 }
 
-async function queue(req) {
-  if (!OV.source) { alert("Start the web UI with --source to enable extraction."); return; }
-  const out = prompt("Output directory (must not be on the evidence):", localStorage.getItem("zfr-out") || "");
-  if (!out) return;
-  try { localStorage.setItem("zfr-out", out); } catch (e) {}
-  req.out = out;
-  try { await api("/api/extract", {method: "POST", headers: {"content-type": "application/json"}, body: JSON.stringify(req)}); }
-  catch (e) { alert(e.message); return; }
-  document.querySelector('nav button[data-tab="jobs"]').click();
+// ------------------------------------------------------------------ extract dialog + estimate
+let exReq = null, estSeq = 0;
+function openExtract(req, what) {
+  if (!OV.evidence || !OV.evidence.length) { toast("Start the web UI with --source (one per member disk) to extract."); return; }
+  exReq = req;
+  $("#exTitle").textContent = req.kind === "files" ? "Extract files" : req.kind === "volume" ? "Extract volume image" : "Extract partition image";
+  $("#exWhat").textContent = what;
+  $("#exStatusRow").hidden = req.kind !== "files";
+  $("#exHashRow").hidden = req.kind === "files";
+  $("#exOut").value = store.get("zesus-out", "");
+  $("#exDlg").showModal(); estimate();
 }
+async function estimate() {
+  const seq = ++estSeq;
+  const req = {...exReq, out: $("#exOut").value.trim() || null, statuses: [...document.querySelectorAll(".exSt:checked")].map(x => x.value)};
+  $("#exEst").innerHTML = '<div><b>…</b><span>estimating</span></div>';
+  let e;
+  try { e = await post("/api/estimate", req); } catch (err) { $("#exEst").innerHTML = `<div class="bad">${esc(err.message)}</div>`; return; }
+  if (seq !== estSeq) return;
+  const out = exReq.kind === "files" ? e.recoverable_bytes : e.read_bytes;   // images are sparse
+  const cells = exReq.kind === "files"
+    ? [[e.files, "files"], [gib(e.bytes), "total size"], [gib(e.recoverable_bytes), "recoverable"], [gib(e.lost_bytes), "unrecoverable (gaps)"]]
+    : [[gib(e.bytes), "image size"], [gib(e.read_bytes), "data to read and verify"], [gib(e.sparse_bytes), "never written (sparse)"], [gib(e.lost_bytes), "unrecoverable (gaps)"]];
+  cells.push([e.eta_s != null ? dur(e.eta_s) : "unknown", e.eta_s != null ? `estimated time at ${(e.rate/1e6).toFixed(0)} MB/s` : "estimated time (no throughput measured yet)"]);
+  if (e.free_bytes != null) cells.push([gib(e.free_bytes), "free on the output drive"]);
+  $("#exEst").innerHTML = cells.map(([v, l]) => `<div><b>${esc(v)}</b><span>${esc(l)}</span></div>`).join("");
+  const warn = [];
+  if (e.out_problem) warn.push(`<span class="bad">${esc(e.out_problem)}</span>`);
+  if (e.free_bytes != null && out > e.free_bytes) warn.push(`<span class="bad">Not enough free space: about ${gib(out)} of data will be written.</span>`);
+  if (e.lost_bytes) warn.push(`<span class="warn">${gib(e.lost_bytes)} cannot be recovered and will be left as reported gaps.</span>`);
+  $("#exOutNote").innerHTML = warn.join("<br>");
+  $("#exGo").disabled = !!e.out_problem || !$("#exOut").value.trim();
+}
+$("#exOut").oninput = () => { clearTimeout(estimate.t); estimate.t = setTimeout(estimate, 400); };
+document.querySelectorAll(".exSt").forEach(x => x.onchange = estimate);
+$("#exCancel").onclick = () => $("#exDlg").close();
+$("#exGo").onclick = async () => {
+  const out = $("#exOut").value.trim(); if (!out) return;
+  store.set("zesus-out", out);
+  const req = {...exReq, out, fill: $("#exFill").value, force: $("#exForce").checked,
+               hash: exReq.kind === "files" || $("#exHash").checked,
+               statuses: [...document.querySelectorAll(".exSt:checked")].map(x => x.value)};
+  try { await post("/api/extract", req); $("#exDlg").close(); tab("jobs"); } catch (e) { $("#exOutNote").innerHTML = `<span class="bad">${esc(e.message)}</span>`; }
+};
 
+// ------------------------------------------------------------------ send
 let sendPaths = null;
 async function openSend(paths) {
   sendPaths = paths;
   const p = $("#sendPanel"); p.hidden = false;
-  $("#sendWhat").textContent = `What: ${paths.join(", ")} (filesystem ${curFs})`;
-  const saved = (() => { try { return JSON.parse(localStorage.getItem("zesus-send") || "{}"); } catch (e) { return {}; } })();
+  $("#sendWhat").textContent = `What: ${paths.length > 5 ? paths.slice(0, 5).join(", ") + ` and ${paths.length - 5} more` : paths.join(", ")} (filesystem ${curFs})`;
+  const saved = store.get("zesus-send", {});
   $("#sDest").value = saved.dest || ""; $("#sSsh").value = saved.ssh || ""; $("#sSudo").checked = !!saved.sudo;
   const t = await api("/api/send/tools");
   $("#sendTools").textContent = t.ok ? `rsync available (${t.mode === "wsl" ? "via WSL" : "native"})` : t.error;
@@ -260,36 +489,85 @@ async function openSend(paths) {
 }
 async function doSend(dry) {
   const req = {fs_id: curFs, paths: sendPaths, dest: $("#sDest").value.trim(), ssh: $("#sSsh").value.trim(),
-               sudo: $("#sSudo").checked, overwrite: $("#sOver").checked, include_partial: $("#sPart").checked,
-               dry_run: dry};
-  if (!req.dest) { alert("Enter a destination."); return; }
-  if (!OV.source) { alert("Start the web UI with --source to enable sending."); return; }
-  try { localStorage.setItem("zesus-send", JSON.stringify({dest: req.dest, ssh: req.ssh, sudo: req.sudo})); } catch (e) {}
+               sudo: $("#sSudo").checked, overwrite: $("#sOver").checked, include_partial: $("#sPart").checked, dry_run: dry};
+  if (!req.dest) { toast("Enter a destination."); return; }
+  store.set("zesus-send", {dest: req.dest, ssh: req.ssh, sudo: req.sudo});
   if (!dry && req.overwrite && !confirm("Overwrite files that already exist at the destination?")) return;
-  try { await api("/api/send", {method: "POST", headers: {"content-type": "application/json"}, body: JSON.stringify(req)}); }
-  catch (e) { alert(e.message); return; }
-  document.querySelector('nav button[data-tab="jobs"]').click();
+  try { await post("/api/send", req); tab("jobs"); } catch (e) { toast(e.message); }
 }
-$("#sendDirBtn").onclick = () => openSend([curPath]);
 $("#sPreview").onclick = () => doSend(true);
 $("#sGo").onclick = () => doSend(false);
 $("#sCancel").onclick = () => { $("#sendPanel").hidden = true; };
 
+// ------------------------------------------------------------------ jobs
+function describe(j) {
+  const r = j.request || {};
+  if (j.kind === "scan") return `Scan: ${(r.phases || []).join(", ")}${r.limit_blocks ? ` (first ${r.limit_blocks} blocks)` : ""}`;
+  if (j.kind === "send") return `Send ${(r.paths || ["everything"]).length} item(s) to ${r.dest}${r.dry_run ? " (dry run)" : ""}`;
+  if (r.kind === "files") return `Extract ${(r.paths || []).length} item(s) → ${r.out}`;
+  return `Extract ${r.kind} → ${r.out}`;
+}
+function progressHtml(p, running) {
+  if (!p) return "";
+  const known = p.pct != null;
+  return `<div class="bar ${running && !known ? "indet" : ""}"><i style="width:${known ? Math.min(100, p.pct) : 0}%"></i></div>
+    <div class="meta">${esc(p.stage || "")}${known ? ` · <b>${p.pct.toFixed(1)}%</b>` : ""}${p.total ? ` of ${p.unit === "bytes" ? gib(p.total) : p.total + " " + p.unit}` : ""}
+      ${rate(p) ? ` · ${rate(p)}` : ""} · elapsed ${dur(p.total_elapsed_s ?? p.elapsed_s)}${running && p.eta_s != null ? ` · <b>ETA ${dur(p.eta_s)}</b>` : ""}
+      ${p.message ? `<br><span class="mono">${esc(p.message)}</span>` : ""}</div>`;
+}
+let JOBS = null;         // last job list, pushed by the server (or polled)
 async function renderJobs() {
-  const j = await api("/api/jobs");
-  $("#jobs").innerHTML = `<div class="card"><h2>Extraction jobs</h2>${j.length ? `<table><tr><th>ID</th><th>What</th><th>State</th><th>Result</th></tr>
-    ${j.map(x => `<tr><td class="mono">${x.id}</td><td class="mono">${esc(JSON.stringify(x.request))}</td><td>${badge(x.state)}</td>
-    <td>${esc(x.message)}${x.log && x.log.length ? `<pre class="log">${esc(x.log.slice(-12).join("\n"))}</pre>` : ""}${(x.outputs||[]).slice(0,20).map(o => `<div class="mono">${badge(o.status)} ${esc(o.path)} ${o.lost_bytes ? "(" + gib(o.lost_bytes) + " lost)" : ""}</div>`).join("")}</td></tr>`).join("")}</table>`
-    : '<div class="empty">No jobs yet. Use the "extract" links in Volumes or Files.</div>'}</div>`;
-  if (j.some(x => x.state === "running" || x.state === "queued")) setTimeout(() => { if ($("#jobs").classList.contains("active")) renderJobs(); }, 2000);
+  let d = JOBS;
+  if (!d) { try { d = JOBS = await api("/api/jobs"); } catch (e) { return; } }
+  const ext = d.external.map(p => `<div class="job"><div class="head">${badge(p.stale ? "stale" : p.state)} <b>Scan in another process</b>
+      <span class="muted">process ${p.pid}${p.stale ? " — no update for over 2 minutes (stopped?)" : ""}</span></div>
+      ${progressHtml(p, p.state === "running" && !p.stale)}${p.state === "running" && !p.stale ? '<div class="note">Cancel it with Ctrl-C in its terminal; it resumes where it stopped.</div>' : ""}</div>`).join("");
+  const mine = d.jobs.slice().reverse().map(j => { const running = j.state === "running" || j.state === "queued";
+    return `<div class="job"><div class="head">${badge(j.cancelling ? "cancelling" : j.state)} <b>${esc(describe(j))}</b>
+      <span class="muted">started ${ts(j.started)}</span>
+      ${running && !j.cancelling ? `<button class="danger" onclick="cancelJob('${j.id}')">Cancel</button>` : ""}</div>
+      ${progressHtml(j.progress, running)}
+      ${j.message ? `<div>${esc(j.message)}</div>` : ""}
+      ${j.log && j.log.length ? `<pre class="log">${esc(j.log.join("\n"))}</pre>` : ""}
+      ${(j.outputs || []).slice(0, 20).map(o => `<div class="mono">${badge(o.cancelled ? "cancelled" : o.status)} ${esc(o.path)} ${o.lost_bytes ? "(" + gib(o.lost_bytes) + " lost)" : ""}</div>`).join("")}
+      ${(j.outputs || []).length > 20 ? `<div class="muted">… and more (see manifest.json)</div>` : ""}</div>`; }).join("");
+  $("#jobs").innerHTML = `<div class="card"><h2>Jobs</h2>${ext + mine || '<div class="empty">No jobs yet. Run a scan from Overview, or extract from Volumes or Files.</div>'}</div>`;
+}
+async function cancelJob(id) {
+  if (!confirm("Cancel this job? Scans resume where they stopped; a cancelled extraction keeps what it wrote and records the rest as gaps.")) return;
+  try { await post(`/api/jobs/${id}/cancel`, {}); toast("Cancelling: the job stops at the next safe point."); } catch (e) { toast(e.message); }
+}
+function onJobs(d) {
+  JOBS = d;
+  checkBuild(d.build);
+  const active = d.jobs.filter(j => j.state === "running").length + d.external.filter(p => p.state === "running" && !p.stale).length;
+  const c = $("#jobCount"); c.hidden = !active; c.textContent = active;
+  if ($("#jobs").classList.contains("active")) renderJobs();
+  if (onJobs.last && !active) load();          // a job finished: refresh the map views
+  onJobs.last = active;
+}
+// Job updates are pushed by the server (server-sent events); polling is the fallback.
+function pollJobs() {
+  if (window.EventSource) {
+    const es = new EventSource("/api/stream");
+    es.addEventListener("hello", e => checkBuild(JSON.parse(e.data).build));
+    es.addEventListener("jobs", e => onJobs(JSON.parse(e.data)));
+    es.onerror = () => { /* the browser reconnects by itself; a restarted server says hello with a new build */ };
+    return;
+  }
+  (async function poll() {
+    let active = 0;
+    try { const d = await api("/api/jobs"); onJobs(d); active = onJobs.last; } catch (e) {}
+    setTimeout(poll, active ? 1000 : 5000);
+  })();
 }
 
 async function renderEvents() {
   const ev = await api("/api/events");
-  $("#events").innerHTML = `<div class="card"><h2>Findings log</h2><table>${ev.map(e => `<tr><td class="muted mono">${esc(e.ts)}</td><td>${esc(e.level)}</td><td>${esc(e.component)}</td><td>${esc(e.message)} <span class="mono muted">${esc(e.context||"")}</span></td></tr>`).join("") || '<tr><td class="empty">No events.</td></tr>'}</table></div>`;
+  $("#events").innerHTML = `<div class="card"><h2>Findings log</h2><div class="tablewrap"><table>${ev.map(e => `<tr><td class="muted mono">${esc(e.ts)}</td><td>${esc(e.level)}</td><td>${esc(e.component)}</td><td>${esc(e.message)}${e.component === "members" ? "" : ` <span class="mono muted">${esc(e.context||"")}</span>`}</td></tr>`).join("") || '<tr><td class="empty">No events.</td></tr>'}</table></div></div>`;
 }
 
-load().catch(e => { $("#overview").innerHTML = `<div class="card">Failed to load: ${esc(e.message)}</div>`; });
+init().catch(e => { $("#overview").innerHTML = `<div class="card">Failed to load: ${esc(e.message)}</div>`; });
 </script>
 </body>
 </html>

@@ -103,3 +103,40 @@ def test_script_runs_and_restores(tmp_path):
     assert stat.S_IMODE(d.stat().st_mode) == 0o700
     assert int((d / "a: b.txt").stat().st_mtime) == 1_600_000_000
     assert os.readlink(d / "link") == "a: b.txt"
+
+
+def test_verify_destination_compares_recorded_hashes(tmp_path):
+    import hashlib
+    import json
+
+    from zesus.extract.send import SendOptions, SendResult, verify_destination
+    from zesus.map.db import MapDB
+    db = MapDB(tmp_path / "m.sqlite")
+    db.execute("INSERT INTO filesystems(id,start,length,fstype,plugin) VALUES(1,0,0,'ext4','ext4')")
+    files = {"/a/good.txt": b"good", "/a/bad.txt": b"expected", "/a/gone.txt": b"x"}
+    for i, p in enumerate(files, 1):
+        db.execute("INSERT INTO fs_entries(id,fs_id,path,type,size,status) VALUES(?,1,?,'file',4,'full')", (i, p))
+    db.commit()
+    staging, dest = tmp_path / "staging", tmp_path / "dest"
+    staging.mkdir()
+    (staging / "manifest.json").write_text(json.dumps({"outputs": [
+        {"kind": "file", "source": p, "sha256": hashlib.sha256(b).hexdigest()} for p, b in files.items()]}))
+    (dest / "a").mkdir(parents=True)
+    (dest / "a" / "good.txt").write_bytes(b"good")
+    (dest / "a" / "bad.txt").write_bytes(b"corrupt!")
+    res = SendResult()
+    verify_destination(db, 1, None, SendOptions(dest=str(dest), staging=staging), res, lambda m: None)
+    assert res.verified == 1
+    assert res.verify_missing == ["/a/gone.txt"] and res.verify_different == ["/a/bad.txt"]
+    assert res.errors and (staging / "verify-fs1.md").exists()
+
+
+def test_script_never_names_paths_outside_the_destination():
+    bad = [row("/", "dir", 0o40755), row("/..", "dir", 0o40755),
+           row("/../../etc/x", "symlink", 0o120777, target="/tmp/y"),
+           row("/a/./b", "file", 0o100644), row("/ok", "file", 0o100644)]
+    namer = LocalNamer(case_insensitive=False)
+    local = {r["path"]: namer.local(r["path"]) for r in bad}
+    script = build_restore_script(bad, local, {"ok"}, owners=True)
+    assert ".." not in script and "etc" not in script and "a/./b" not in script
+    assert "chmod 644 ok" in script

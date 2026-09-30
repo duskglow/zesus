@@ -1,0 +1,110 @@
+{
+ "ashift": 12,
+ "content": {
+  "gone": [
+   [
+    300,
+    1048576,
+    "mixed"
+   ]
+  ],
+  "vol": [
+   [
+    0,
+    524288,
+    "random"
+   ],
+   [
+    1,
+    1048576,
+    "text"
+   ]
+  ]
+ },
+ "files": {
+  "fs/f0-0.bin": {
+   "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+   "size": 0
+  },
+  "fs/f1-1.bin": {
+   "sha256": "01ba4719c80b6fe911b091a7c05124b64eeece964e09c058ef8f9805daca546b",
+   "size": 1
+  },
+  "fs/f10-40000.bin": {
+   "sha256": "355f250c879667fa4e92a23fd30a8ac41a56f36ba8a4d1018eb35887b3334cce",
+   "size": 40000
+  },
+  "fs/f11-131072.bin": {
+   "sha256": "d5003122a556913101cea71ddb673f13bc3e9db716b5ef8deb9508b55234ad66",
+   "size": 131072
+  },
+  "fs/f12-131073.bin": {
+   "sha256": "d3ae128633f0db53ca919ef60c0eb4ce14afae60d6591785c7749f0e076dd0c6",
+   "size": 131073
+  },
+  "fs/f2-100.bin": {
+   "sha256": "ca2720a0f0f25b49400de3dd7b82411951c3494ca0ff94c6de552d395f6aa65f",
+   "size": 100
+  },
+  "fs/f3-511.bin": {
+   "sha256": "26112f051f2448a41dd026102b9953befd7ce70dfd39831647818a676f1f7c14",
+   "size": 511
+  },
+  "fs/f4-512.bin": {
+   "sha256": "3c64f7cef62c2776070d51fd300360154dca2b5dacfe9822e29b081aa8c81bfe",
+   "size": 512
+  },
+  "fs/f5-513.bin": {
+   "sha256": "8696777795ba1191f68e4dc09512c46ec6765e23fe80ecc21d38b5f7b0fc8df0",
+   "size": 513
+  },
+  "fs/f6-4095.bin": {
+   "sha256": "8a31102496072a35d9d8b61a0a0b5552e2b11f0403a113d08a03df14f0cb2eaa",
+   "size": 4095
+  },
+  "fs/f7-4096.bin": {
+   "sha256": "4918af48a8f43cf35b98eb80ada08da0eb13cddcda69d0ef977e6fa3086f2648",
+   "size": 4096
+  },
+  "fs/f8-4097.bin": {
+   "sha256": "c1b8c831cd9b0673adb2531bafd744409a266dfcd34f6344fbb9bd8f3a01fffa",
+   "size": 4097
+  },
+  "fs/f9-12000.bin": {
+   "sha256": "8d886a9ff038615acb2bb52a45948d5cafc21da543cdc6823110932e5ea2f8b7",
+   "size": 12000
+  },
+  "fs/sub/deeper/nested.txt": {
+   "sha256": "92ac44920e7b9a659ca4262ae4f4bee82989577c5e0a9286f7148c58904430a2",
+   "size": 70000
+  },
+  "gonefs/lost.bin": {
+   "sha256": "44f204f9b872e64173d7ef5bfe103d5e5085df5b0e56a7d6ca8cc693e5fef51b",
+   "size": 200000
+  }
+ },
+ "layout": "mirror",
+ "members": 2,
+ "name": "mirror-a12",
+ "pool": "zfx_mirror_a12",
+ "pool_guid": "546406669423880927",
+ "seed": 1892961398,
+ "zfs_version": [
+  "zfs-2.2.2-0ubuntu9.5",
+  "zfs-kmod-2.2.2-0ubuntu9.5"
+ ],
+ "zvols": {
+  "gone": {
+   "destroyed": true,
+   "sha256": "ef98dd6b2b73bf97d47f464d13606705226fa3587523ad2515f60d70c9e8df38",
+   "size": 1048576,
+   "volblocksize": 16384
+  },
+  "vol": {
+   "destroyed": false,
+   "sha256": "f7ac2bafab10f3e6e55031b36216b3a71aaef93d045a329c59667b8056790543",
+   "size": 1572864,
+   "volblocksize": 8192
+  }
+ }
+}

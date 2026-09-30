@@ -132,12 +132,13 @@ class VolumeReconstructor:
     def roots_from_carving(self, geometry: tuple[int, int, int, int] | None) -> list[Root]:
         roots: list[Root] = []
         rows = self.db.execute(
-            "SELECT id, phys, psize_hint, max_birth, kind, info_json FROM carved WHERE pool_id=? AND "
+            "SELECT id, phys, vdev_top, dva_offset, psize_hint, max_birth, kind, info_json FROM carved "
+            "WHERE pool_id=? AND "
             "((kind='objset' AND os_type=3) OR (kind='dnodes' AND info_json LIKE '%\"slots\": [[1, 23,%')) "
             "AND max_birth < ? ORDER BY max_birth DESC", (self.pool_id, self.destroy_txg)).fetchall()
         for row in rows:
             try:
-                raw = self._read_phys(row["phys"], row["psize_hint"])
+                raw = self._read_carved(row["vdev_top"], row["dva_offset"], row["psize_hint"])
                 if row["kind"] == "objset":
                     os_ = Objset(self.r, raw, f"carved@{row['phys']:#x}")
                     root = self._root_from_objset(os_, row["max_birth"], f"carved-objset@{row['phys']:#x}")
@@ -167,9 +168,16 @@ class VolumeReconstructor:
             roots.append(root)
         return roots
 
-    def _read_phys(self, phys: int, n: int) -> bytes:
-        im = self.pool.vdev_images[0]
-        return im.source.read_exact(phys - im.base_offset, n)
+    def _read_carved(self, vdev_top: int, dva_offset: int, n: int) -> bytes:
+        """Unverified bytes of a carved block, through the vdev layer (so RAIDZ columns are
+        assembled, and rebuilt from parity where a member is missing). Carved blocks are
+        verified later, against the parent pointers that reference them."""
+        top = self.pool.vdevs.top.get(vdev_top)
+        if top is None:
+            raise EOFError(f"carved block on absent vdev {vdev_top}")
+        for cand in top.candidates(dva_offset, n):
+            return cand.data
+        raise EOFError(f"carved block at {vdev_top}:{dva_offset:#x} unreadable")
 
     # ------------------------------------------------------------------ association
     def signature(self, root: Root, depth: int = 2) -> set[tuple] | None:
@@ -299,8 +307,8 @@ class VolumeReconstructor:
         for i, row in enumerate(todo):
             if i and i % 20000 == 0:
                 log.info("  carved %d/%d (%.0f/s)", i, len(todo), i / (time.monotonic() - t0))
-            raw = self._read_phys(row["phys"], row["psize_hint"])
             try:
+                raw = self._read_carved(row["vdev_top"], row["dva_offset"], row["psize_hint"])
                 clen = struct.unpack_from(">I", raw, 0)[0]
                 data = lz4.block.decompress(raw[4:4 + clen], uncompressed_size=row["lsize"])
             except Exception:

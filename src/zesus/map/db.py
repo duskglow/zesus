@@ -18,6 +18,15 @@ log = logging.getLogger(__name__)
 
 SCHEMA_VERSION = 1
 
+# Columns added after schema v1 shipped. Maps are upgraded in place by adding them; the
+# version stays 1 because the change is purely additive (old readers keep working).
+ADDED_COLUMNS = [
+    ("sources", "pool_guid", "TEXT"), ("sources", "member_guid", "TEXT"),
+    ("sources", "vdev_top", "INTEGER"), ("sources", "child_id", "INTEGER"), ("sources", "role", "TEXT"),
+    ("vdevs", "child_id", "INTEGER"), ("vdevs", "source_id", "INTEGER"), ("vdevs", "state", "TEXT"),
+    ("carved", "member", "INTEGER"),
+]
+
 
 def now() -> str:
     return _dt.datetime.now(_dt.timezone.utc).isoformat(timespec="seconds")
@@ -92,8 +101,17 @@ class MapDB:
             if bad:
                 raise RuntimeError(f"map migration left dangling references in {bad}")
         self.conn.execute("DROP TABLE IF EXISTS volume_blocks")
+        # Multi-disk support: additive, nullable columns. Older tools ignore them.
+        for table, col, decl in ADDED_COLUMNS:
+            have = {r[1] for r in self.conn.execute(f"PRAGMA table_info({table})")}
+            if col not in have:
+                log.info("migrating map: %s gains %s", table, col)
+                self.conn.execute(f"ALTER TABLE {table} ADD COLUMN {col} {decl}")
 
     # -- meta / progress ----------------------------------------------------------
+    def has_column(self, table: str, col: str) -> bool:
+        return any(r[1] == col for r in self.conn.execute(f"PRAGMA table_info({table})"))
+
     def get_meta(self, key: str) -> str | None:
         r = self.conn.execute("SELECT value FROM meta WHERE key=?", (key,)).fetchone()
         return r[0] if r else None

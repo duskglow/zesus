@@ -19,7 +19,8 @@ def add_extract_parser(sub) -> None:
                        description="Extract data using a map. The source image/device is read-only and "
                                    "every block is re-verified. Gaps are reported, never hidden.")
     e.add_argument("map")
-    e.add_argument("source", help="the same image/device the map was built from")
+    e.add_argument("source", nargs="*",
+                   help="the image(s)/device(s) the map was built from (default: the paths recorded in the map)")
     e.add_argument("-o", "--out", help="output directory (required unless --list)")
     e.add_argument("--list", action="store_true", help="list what can be extracted and exit")
     e.add_argument("--volume", action="append", default=[], metavar="ID|NAME",
@@ -45,6 +46,9 @@ def add_extract_parser(sub) -> None:
     e.add_argument("--partial-suffix", default=None, help="append this suffix to incomplete outputs")
     e.add_argument("--force", action="store_true", help="overwrite existing outputs")
     e.add_argument("--no-sparse", action="store_true", help="do not create sparse output files")
+    e.add_argument("--progress-interval", type=float, default=30, help="seconds between progress lines")
+    from .main import add_parallel_args
+    add_parallel_args(e)
     e.set_defaults(func=cmd_extract)
 
     sd = sub.add_parser("send", help="send recovered files back where they belong (rsync + original metadata)",
@@ -54,13 +58,25 @@ def add_extract_parser(sub) -> None:
                                     "overwritten unless --overwrite; partially recovered files are held back "
                                     "unless --include-partial.")
     sd.add_argument("map")
-    sd.add_argument("source", help="the same image/device the map was built from")
+    sd.add_argument("source", nargs="*",
+                    help="the image(s)/device(s) the map was built from (default: the paths recorded in the map)")
     sd.add_argument("--fs", type=int, required=True, metavar="FSID", help="filesystem id (see extract --list)")
     sd.add_argument("--path", action="append", default=[], metavar="GLOB",
                     help="only these paths (glob or directory prefix); default: everything")
     sd.add_argument("--to", required=True, metavar="DEST", help="user@host:/path, or a local directory")
     sd.add_argument("--staging", help="local staging directory (default: <map dir>/staging)")
     sd.add_argument("--ssh", default="", help='extra ssh options, e.g. "-p 2222 -i ~/.ssh/id_ed25519"')
+    sd.add_argument("--ssh-command", default="ssh",
+                    help="ssh program rsync uses (under WSL, /mnt/c/Windows/System32/OpenSSH/ssh.exe uses "
+                         "the Windows keys and known hosts)")
+    sd.add_argument("--batch", default="0", metavar="SIZE",
+                    help="stage, send and delete this much at a time (e.g. 50G), for selections larger "
+                         "than the local disk; resumable")
+    sd.add_argument("--verify", action="store_true",
+                    help="afterwards, hash every sent file on the destination and compare it with the hash "
+                         "recorded when it was extracted and verified (only hashes cross the network)")
+    sd.add_argument("--verify-only", action="store_true",
+                    help="only run that check, for an earlier send with the same --staging")
     sd.add_argument("--sudo", action="store_true",
                     help="run rsync and the restore script as root on the destination (sudo -n); restores owners")
     sd.add_argument("--overwrite", action="store_true", help="replace files that already exist at the destination")
@@ -112,10 +128,9 @@ def print_list(db, out=sys.stdout) -> None:
 
 
 def cmd_extract(args: argparse.Namespace) -> int:
+    from ..evidence import EvidenceError, open_evidence, pool_for_map
     from ..extract.engine import Extractor, Options
-    from ..io.source import RawSource
     from ..map.db import MapDB
-    from ..zfs.pool import open_pools
 
     logsetup.setup(args.verbose, args.log)
     db = MapDB(args.map, readonly=True)
@@ -126,18 +141,26 @@ def cmd_extract(args: argparse.Namespace) -> int:
         raise SystemExit("--out is required")
     if not (args.volume or args.partition or args.fs or args.fs_image):
         raise SystemExit("nothing selected: use --volume, --partition or --fs (see --list)")
-    src = RawSource(args.source)
-    prev = db.execute("SELECT size, mtime_ns FROM sources ORDER BY id DESC LIMIT 1").fetchone()
-    if prev and prev["size"] != src.size:
-        raise SystemExit(f"source size {src.size} does not match the map's source ({prev['size']})")
-    pools = open_pools(src)
-    if not pools:
-        raise SystemExit("no ZFS pool found in source")
-    pool = pools[0]
+    try:
+        src = open_evidence(db, args.source)
+        pool = pool_for_map(db, src)
+    except EvidenceError as exc:
+        raise SystemExit(str(exc)) from exc
+    from ..carve.scanner import Stop
+    from ..progress import Progress, cli_logger
+    from .main import apply_parallel_args
+    apply_parallel_args(args, [m.name for m in src])
+    stop = Stop()
+    stop.install()
+    prog = Progress("extract")
+    prog.listen(cli_logger(log), args.progress_interval)
+    from ..progress import MapPublisher
+    publisher = MapPublisher(args.map)
+    prog.listen(publisher, 2.0)
     ex = Extractor(db, pool, Options(out_dir=Path(args.out), fill=args.fill,
                                      include_unverified=args.include_unverified, force=args.force,
                                      partial_suffix=args.partial_suffix, sparse=not args.no_sparse,
-                                     hash_outputs=not args.no_hash))
+                                     hash_outputs=not args.no_hash), progress=prog, stop=stop)
     if args.include_unverified:
         log.warning("--include-unverified: blocks failing their checksum WILL be written; outputs may be corrupt")
     t0 = time.monotonic()
@@ -176,36 +199,69 @@ def cmd_extract(args: argparse.Namespace) -> int:
     for fid in args.fs:
         ex.extract_files(fid, patterns=args.path or None, statuses=set(args.status.split(",")),
                          include_deleted=not args.no_deleted)
-    man = ex.write_manifest({"map": str(Path(args.map).resolve()), "source": args.source})
+    man = ex.write_manifest({"map": str(Path(args.map).resolve()), "source": src.name,
+                             "sources": [m.name for m in src]})
     full = sum(1 for r in ex.records if r.status == "full")
     part = sum(1 for r in ex.records if r.status == "partial")
     none = sum(1 for r in ex.records if r.status == "none")
-    log.info("done in %.0fs: %d outputs (%d full, %d partial, %d unrecoverable). Manifest: %s",
-             time.monotonic() - t0, len(ex.records), full, part, none, man)
+    log.info("%s in %.0fs: %d outputs (%d full, %d partial, %d unrecoverable). Manifest: %s",
+             "CANCELLED" if ex.cancelled else "done", time.monotonic() - t0, len(ex.records), full, part, none,
+             man)
+    prog.finish("cancelled" if ex.cancelled else "done")
+    publisher.close()
     src.verify_unchanged()
+    from ..jobs import job_id, write_exit
+    if job_id():
+        # exit code 2 (outputs with gaps) is a normal result for the web UI, not a failure
+        write_exit(0 if not ex.cancelled else 130, f"{len(ex.records)} outputs ({full} full, {part} partial, "
+                   f"{none} unrecoverable)" + ("; CANCELLED: see manifest.json" if ex.cancelled else ""),
+                   "cancelled" if ex.cancelled else "done",
+                   outputs=[{"path": r.path, "status": r.status, "lost_bytes": r.lost_bytes, "size": r.size,
+                             "cancelled": bool(r.extra.get("cancelled"))} for r in ex.records[:200]],
+                   n_outputs=len(ex.records), manifest=str(man))
+        return 0
     return 0 if not (part or none) else 2
 
 
 def cmd_send(args: argparse.Namespace) -> int:
     import shlex
 
+    from ..evidence import EvidenceError, open_evidence, pool_for_map
     from ..extract.send import SendOptions, send
-    from ..io.source import RawSource
     from ..map.db import MapDB
-    from ..zfs.pool import open_pools
 
     logsetup.setup(args.verbose, args.log)
     db = MapDB(args.map, readonly=True)
-    src = RawSource(args.source)
-    pool = open_pools(src)[0]
+    try:
+        src = open_evidence(db, args.source)
+        pool = pool_for_map(db, src)
+    except EvidenceError as exc:
+        raise SystemExit(str(exc)) from exc
     staging = Path(args.staging) if args.staging else Path(args.map).resolve().parent / "staging"
+    from .main import _size
     opts = SendOptions(dest=args.to, staging=staging, ssh_args=shlex.split(args.ssh), overwrite=args.overwrite,
+                       ssh_command=args.ssh_command, batch_bytes=_size(args.batch),
+                       verify=args.verify, verify_only=args.verify_only,
                        include_partial=args.include_partial, dry_run=args.dry_run, sudo=args.sudo,
                        metadata=not args.no_metadata)
-    res = send(db, pool, args.fs, args.path or None, opts)
+    from ..carve.scanner import Stop
+    from ..progress import MapPublisher, Progress
+    stop = Stop()
+    stop.install()
+    prog = Progress("send")
+    publisher = MapPublisher(args.map)
+    prog.listen(publisher, 2.0)
+    res = send(db, pool, args.fs, args.path or None, opts, progress=lambda m: (log.info("%s", m), prog.note(m)),
+               stop=stop, meter=prog)
+    prog.finish("stopped" if stop.event.is_set() else ("failed" if res.errors else "done"))
+    publisher.close()
     log.info("%s: staged %d, sent %d, restored metadata on %d; held back %d partial, %d unrecoverable%s",
              "DRY RUN" if res.dry_run else "done", res.staged, res.sent, res.restored, res.held_back_partial,
              res.unrecoverable, f"; restore script: {res.script}" if res.script else "")
+    if res.verified is not None:
+        log.info("verification: %d identical, %d missing, %d different, %d without a recorded hash; report: %s",
+                 res.verified, len(res.verify_missing), len(res.verify_different), res.verify_unhashed,
+                 res.verify_report)
     for e in res.errors:
         log.error("%s", e)
     src.verify_unchanged()

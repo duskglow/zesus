@@ -12,7 +12,7 @@ read-only (RawSource + guard).
     python dev/imgtool.py hexdump 0x100000 256
     python dev/imgtool.py dva 0:5800016000:1000 [--lsize 0x4000 --comp lz4] [--hexdump]
     python dev/imgtool.py bp <256 hex chars>
-    python dev/imgtool.py objset --dataset kikuri/vm-100-disk-0 [--txg N] [--obj 1]
+    python dev/imgtool.py objset --dataset tank/vm-100-disk-0 [--txg N] [--obj 1]
     python dev/imgtool.py zap --dataset NAME --obj 2 | --mos-obj 1
     python dev/imgtool.py carve-sample 0x0 0x40000000
 """

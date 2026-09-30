@@ -22,6 +22,23 @@ SELECT file_offset, length, volume_offset, kind, status FROM fs_extents
  WHERE entry_id = (SELECT id FROM fs_entries WHERE path = '/etc/fstab');
 ```
 
+Multi-disk pools add nullable columns (the schema version stays 1, so older versions of
+the tool can still open the map):
+
+* `sources`: which pool member each evidence file holds (`pool_guid`, `member_guid`,
+  `vdev_top`, `child_id`, `role` = member / duplicate).
+* `vdevs`: `child_id`, `source_id`, `state` (present / stale).
+* `carved`: `member`, the RAIDZ child holding the block's first data column. `dva_offset`
+  is always the DVA, so carved blocks are used the same way whatever the vdev type.
+
+Progress of a running scan is in `meta` under `progress:<pid>` (JSON: stage, done/total,
+rate, ETA), for other programs (such as the web UI) to follow.
+
+```sql
+-- which file is which disk
+SELECT path, vdev_top, child_id, role FROM sources ORDER BY id DESC;
+```
+
 `volume_spans` rows hold packed binary data (level-1 block pointers plus per-slot choice
 and status). Use `zesus.volume.logical.LogicalVolume` rather than decoding them by
 hand.

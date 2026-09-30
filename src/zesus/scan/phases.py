@@ -172,40 +172,58 @@ def phase_datasets(ctx: ScanContext) -> None:
 
 @phase("carve")
 def phase_carve(ctx: ScanContext) -> bool:
-    """Scan every allocatable byte of each present vdev for ZFS metadata blocks."""
+    """Scan every allocatable byte of each present vdev for ZFS metadata blocks.
+
+    Single disks are carved in DVA space. A mirror is carved once, through its
+    healthiest child (every child holds the same blocks). RAIDZ is carved by row ranges
+    across its member disks (see :mod:`zesus.carve.raidz_carve`).
+    """
+    from ..carve.raidz_carve import run_raidz_carve, top_spec
+
     opts = ctx.options
     partial = opts.get("carve_start") is not None or opts.get("carve_end") is not None
     for pool in ctx.pools:
         pid = ctx.pool_ids[pool.guid]
-        for im in pool.vdev_images:
-            vt = (im.config or {}).get("vdev_tree", {})
-            top = vt.get("id", 0)
-            asize = vt.get("asize") or (im.source.size - (4 << 20) - (512 << 10))
-            lim = PoolLimits(n_vdevs=max(1, pool.config.get("vdev_children", 1)),
-                             vdev_asize=max(t.asize for t in pool.vdevs.top.values()),
-                             max_txg=pool.max_txg)
-            target = CarveTarget(pool_id=pid, vdev_top=top, source=im.source, base_phys=im.base_offset,
-                                 asize=asize, ashift=vt.get("ashift", 9))
-            last = [0.0]
+        lim = PoolLimits(n_vdevs=max(1, pool.config.get("vdev_children", 1)),
+                         vdev_asize=max(t.asize for t in pool.vdevs.top.values()),
+                         max_txg=pool.max_txg)
+        for top_id, top in sorted(pool.vdevs.top.items()):
+            prog = ctx.progress
+            c_lo = opts.get("carve_start") or 0
+            c_hi = min(opts.get("carve_end") or top.asize, top.asize)
+            if prog is not None:
+                prog.begin(f"carve vdev {top_id}", max(0, c_hi - c_lo), "bytes")
 
-            def progress(pos: int, end: int, st, rate: float, last=last, top=top) -> None:
-                import time
-                t = time.monotonic()
-                if t - last[0] >= opts.get("progress_interval", 30):
-                    last[0] = t
-                    eta = (end - pos) / rate if rate else 0
-                    log.info("carve vdev %d: %5.1f%%  %.0f MB/s  ETA %dm  (chunk: %d candidates, %d hits %s)",
-                             top, 100 * pos / end, rate / 1e6, eta // 60, st.candidates, st.hits, st.by_kind)
+            def progress(pos: int, end: int, st, rate: float, prog=prog, c_lo=c_lo) -> None:  # noqa: ARG001
+                if prog is not None:
+                    prog.set(max(0, pos - c_lo), message=f"{st.hits} hits in last chunk {st.by_kind or ''}")
 
-            ok = run_carve(ctx.db, target, lim, chunk_size=opts.get("chunk_size", 64 << 20),
-                           start=opts.get("carve_start") or 0, end=opts.get("carve_end"),
-                           stop=ctx.stop, progress=progress)
+            common = {"chunk_size": opts.get("chunk_size", 64 << 20), "start": opts.get("carve_start") or 0,
+                      "end": opts.get("carve_end"), "stop": ctx.stop, "progress": progress}
+            if top.unsupported:
+                log.error("vdev %d not carved: %s", top_id, top.unsupported)
+                ctx.db.event("error", "carve", f"vdev {top_id} not carved: {top.unsupported}")
+                continue
+            if not top.children:
+                log.warning("vdev %d: no member present; nothing to carve", top_id)
+                continue
+            if top.type == "raidz":
+                im0 = next(im for im in pool.vdev_images if im.source is top.children[0].source)
+                ok = run_raidz_carve(ctx.db, pid, top, im0.base_offset, lim, spec=top_spec(pool, top), **common)
+            else:
+                leaf = sorted(top.children, key=lambda lf: lf.errors)[0]
+                im = next(im for im in pool.vdev_images if im.source is leaf.source)
+                vt = (im.config or {}).get("vdev_tree", {})
+                asize = top.asize or vt.get("asize") or (im.source.size - (4 << 20) - (512 << 10))
+                target = CarveTarget(pool_id=pid, vdev_top=top_id, source=im.source,
+                                     base_phys=im.base_offset, asize=asize, ashift=top.ashift)
+                ok = run_carve(ctx.db, target, lim, **common)
             if not ok:
                 return False
             counts = dict(ctx.db.execute("SELECT kind, count(*) FROM carved WHERE pool_id=? GROUP BY kind",
                                          (pid,)).fetchall())
-            log.info("carving of pool %s vdev %d complete: %s", pool.name, top, counts)
-            ctx.db.event("info", "carve", f"carving complete for vdev {top}", counts=counts)
+            log.info("carving of pool %s vdev %d complete: %s", pool.name, top_id, counts)
+            ctx.db.event("info", "carve", f"carving complete for vdev {top_id}", counts=counts)
     return not partial
 
 
@@ -327,6 +345,18 @@ def _match_history(ctx: ScanContext, pid: int, lo: int, hi: int, volsize: int) -
 
 def _reconstruct_one(ctx: ScanContext, rec, ds: dict, roots: list, n_carved: int, limit) -> None:
     from ..carve.verify import summarize
+    # A single-level tree (a just-created, still empty zvol) has no level-1 blocks to map:
+    # its dnode points at no more than three data blocks. Such versions are skipped.
+    flat = [r for r in roots if r.geometry[0] < 2]
+    if flat:
+        roots = [r for r in roots if r.geometry[0] >= 2]
+        n_carved = sum(1 for r in roots if not r.provenance.startswith("ring"))
+        log.info("volume %s: skipping %d single-level tree version(s) (empty or at most 3 blocks)",
+                 ds["name"], len(flat))
+        if not roots:
+            ctx.db.event("warning", "reconstruct", f"{ds['name']}: only single-level tree versions "
+                         "were found (an empty or tiny zvol); nothing to map", txgs=[r.txg for r in flat])
+            return
     log.info("volume %s: %d tree versions (%d from ring, %d carved); newest txg %d",
              ds["name"], len(roots), len(roots) - n_carved, n_carved, max(r.txg for r in roots))
     spans, ref = rec.build(roots, limit_blocks=limit)
@@ -337,7 +367,10 @@ def _reconstruct_one(ctx: ScanContext, rec, ds: dict, roots: list, n_carved: int
             "dataset_id": ds["id"], "name": ds["name"], "volsize": volsize,
             "volblocksize": ref.dnode.datablksz, "nlevels": ref.dnode.nlevels,
             "root_txg": max(r.txg for r in roots), "n_blocks": rec.maxblkid + 1, "status": "mapped",
-            "notes": j({"stats": rec.stats.__dict__, "limit_blocks": limit})})
+            # tree_maxblkid: the highest block the tree ever allocated. ZFS reads anything
+            # past it as zeros, so extraction treats that tail as never written.
+            "notes": j({"stats": rec.stats.__dict__, "limit_blocks": limit,
+                        "tree_maxblkid": ref.dnode.maxblkid})})
         for r in roots:
             ctx.db.insert("volume_roots", {"volume_id": vid, "txg": r.txg, "top_bp": r.top_bp.raw,
                                            "provenance": r.provenance, "usable": 1})
@@ -355,7 +388,7 @@ def phase_verify(ctx: ScanContext) -> bool:
     for vid, name in ctx.db.execute("SELECT id, name FROM volumes").fetchall():
         pool = ctx.pools[0]
         log.info("verifying volume %s", name)
-        Verifier(pool, ctx.db, vid, stop=ctx.stop).run()
+        Verifier(pool, ctx.db, vid, stop=ctx.stop, progress=ctx.progress).run()
         if ctx.stop is not None and ctx.stop.event.is_set():
             return False
     return True

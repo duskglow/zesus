@@ -20,7 +20,7 @@ from . import blkptr as bpmod
 from . import checksum, compress
 from .blkptr import BlockPointer, Dva
 from .constants import ChecksumType
-from .vdev import VdevMap
+from .vdev import Candidate, VdevMap
 
 log = logging.getLogger(__name__)
 
@@ -43,6 +43,7 @@ class BlockRead:
     data: bytes | None
     dva: Dva | None = None
     notes: list[str] = field(default_factory=list)
+    repaired: tuple[int, ...] = ()      # RAIDZ children rebuilt from parity for this read
 
     @property
     def ok(self) -> bool:
@@ -62,15 +63,16 @@ class BlockReader:
 
     # ------------------------------------------------------------------ raw physical
     def read_dva(self, dva: Dva, length: int) -> list[tuple[str, bytes]]:
-        """Read *length* bytes at *dva* from every available copy (mirror children)."""
+        """Read *length* bytes at *dva*: every direct copy (mirror children), or for RAIDZ
+        the first assembled reading. Unverified; see :meth:`read` for verified reads."""
         top = self.vdevs.top.get(dva.vdev)
         if top is None:
             raise Unsupported(f"DVA references unknown vdev {dva.vdev}")
         out = []
-        for leaf in top.readers():
-            data = leaf.read(dva.offset, length)
-            if len(data) == length:
-                out.append((leaf.path, data))
+        for c in top.candidates(dva.offset, length):
+            out.append((c.provenance if c.leaf is None else c.leaf.path, c.data))
+            if top.type == "raidz":
+                break
         return out
 
     # ------------------------------------------------------------------ verified reads
@@ -114,39 +116,55 @@ class BlockReader:
         saw_zero = False          # a copy read back as all zeros
         saw_mismatch = False      # a copy had non-zero content that failed its checksum
         for dva in bp.valid_dvas:
+            top = self.vdevs.top.get(dva.vdev)
             try:
-                copies = (self._read_gang(bp, dva, notes) if dva.gang
-                          else self.read_dva(dva, bp.psize))
+                if dva.gang:
+                    cands = iter([Candidate(d, "gang") for _p, d in self._read_gang(bp, dva, notes)])
+                elif top is None:
+                    raise Unsupported(f"DVA references unknown vdev {dva.vdev}")
+                else:
+                    cands = top.candidates(dva.offset, bp.psize, notes)
+                ncopies = len(top.children) if top is not None and top.type == "mirror" else 1
+                tried = 0
+                for cand in cands:
+                    tried += 1
+                    raw = cand.data
+                    where = f"{dva}{_copy(cand, ncopies)}"
+                    status = self._verify(bp, raw)
+                    if top is not None:
+                        top.note_result(cand, status is not ReadStatus.CHECKSUM_MISMATCH)
+                    if status is ReadStatus.CHECKSUM_MISMATCH:
+                        if any(raw):
+                            saw_mismatch = True
+                            notes.append(f"{where}: checksum mismatch (overwritten?)")
+                        else:
+                            saw_zero = True
+                            notes.append(f"{where}: reads as zeros (freed and trimmed?)")
+                        if verify:
+                            continue
+                    if cand.repaired:
+                        notes.append(f"{where}: {cand.provenance}")
+                        self._count("raidz_rebuilt")
+                        if status is ReadStatus.UNVERIFIED:
+                            notes.append(f"{where}: parity-reconstructed, unverifiable")
+                    if not decompress:
+                        return BlockRead(status, raw, dva, notes, cand.repaired)
+                    try:
+                        data = compress.decompress(bp.comp, raw, bp.lsize)
+                    except (DecompressionError, Unsupported) as exc:
+                        notes.append(f"{where}: {exc}")
+                        if status is ReadStatus.OK:
+                            return BlockRead(ReadStatus.DECOMPRESS_FAILED, None, dva, notes)
+                        continue
+                    return BlockRead(status, data, dva, notes, cand.repaired)
             except Unsupported as exc:
                 notes.append(str(exc))
                 continue
             except CorruptStructure as exc:
                 notes.append(f"{dva}: {exc}")
                 continue
-            if not copies:
+            if not tried:
                 notes.append(f"{dva}: beyond end of device or no device")
-            top_paths = len(copies)
-            for path, raw in copies:
-                status = self._verify(bp, raw)
-                if status is ReadStatus.CHECKSUM_MISMATCH:
-                    if any(raw):
-                        saw_mismatch = True
-                        notes.append(f"{dva}{_copy(path, top_paths)}: checksum mismatch (overwritten?)")
-                    else:
-                        saw_zero = True
-                        notes.append(f"{dva}{_copy(path, top_paths)}: reads as zeros (freed and trimmed?)")
-                    if verify:
-                        continue
-                if not decompress:
-                    return BlockRead(status, raw, dva, notes)
-                try:
-                    data = compress.decompress(bp.comp, raw, bp.lsize)
-                except (DecompressionError, Unsupported) as exc:
-                    notes.append(f"{dva}{_copy(path, top_paths)}: {exc}")
-                    if status is ReadStatus.OK:
-                        return BlockRead(ReadStatus.DECOMPRESS_FAILED, None, dva, notes)
-                    continue
-                return BlockRead(status, data, dva, notes)
         if saw_mismatch:
             return BlockRead(ReadStatus.CHECKSUM_MISMATCH, None, None, notes)
         if saw_zero:
@@ -196,9 +214,9 @@ class BlockReader:
         return [(path, b"".join(parts)[: bp.psize])]
 
 
-def _copy(path: str, ncopies: int) -> str:
+def _copy(cand: Candidate, ncopies: int) -> str:
     """Name the mirror child in a note only when there is more than one."""
-    return f"@{path}" if ncopies > 1 else ""
+    return f"@{cand.leaf.path}" if ncopies > 1 and cand.leaf is not None else ""
 
 
 def u64s(data: bytes, count: int | None = None, bo: str = "<") -> tuple[int, ...]:
