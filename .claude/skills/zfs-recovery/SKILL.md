@@ -153,6 +153,50 @@ and compared with the SHA-256 Zesus recorded when it extracted and verified the 
 Only the hashes cross the network. Report the identical, missing and different counts.
 Only when everything matches should you tell the owner the source can be released.
 
+## Special cases
+
+### Encrypted datasets (native ZFS encryption)
+
+Zesus cannot decrypt yet. It recognizes encrypted blocks and reports them as unreadable
+("block is encrypted"). It never presents ciphertext as recovered data. If you see this
+on most of a dataset's blocks, the dataset is encrypted. That is not damage, and it does
+not mean the recovery failed.
+
+* **Without the key you can still read** the labels, the pool configuration, the pool
+  history and the dataset list (encryption covers dataset contents, not the pool's
+  structure). So `members`, `info` and the history and datasets phases still work. Use
+  them to tell the owner what exists and how damaged the pool is.
+* **The owner will need the passphrase or keyfile** for any encrypted dataset. Ask
+  whether they have it before promising anything.
+* **Ways forward. Lay them out and let the owner choose:**
+  1. If the pool structure is intact (or nearly), import a *copy* of the images
+     read-only with OpenZFS (`zpool import -o readonly=on -d <dir-of-copies>`) and load
+     the key there. Never import the originals.
+  2. If only Zesus can reach the data (a destroyed dataset, or blocks off the ring),
+     decryption support has to be added to Zesus. That is development work: do it as a
+     separate, tested change (see `CLAUDE.md`, open items), never as an improvised patch
+     in the middle of a recovery. Recovered bytes must still be verified, here by the
+     block MACs.
+* **Never write the key** to disk, the map, logs, job records or the shell history. Take
+  it at run time, from the owner, through a prompt or a file they control.
+
+### Disks shorter than the pool expects (often after a BIOS update)
+
+Signs: the log says "2/4 labels readable" (the two at the start are found, the two at
+the end are not), or "partition ... extends beyond end of source", or an image is smaller
+than the vdev size its label records. Some firmware creates a hidden
+protected area (HPA) at the end of a disk, for example for a BIOS backup. Some rewrites
+the partition table. Others flip the SATA/RAID mode so the disk appears differently.
+The pool data itself is usually intact.
+
+* Tell the owner what you see, and that an HPA can be checked on the original disk with
+  a read-only query (`hdparm -N /dev/sdX`). Removing an HPA or fixing a partition table
+  changes the disk, so it is the owner's decision. Image again afterwards if they do it.
+* Zesus does not need the end-of-disk labels if the front ones are intact, so the scan
+  can usually go ahead. Data beyond the cut-off is reported lost, not guessed.
+* If the only damage is the partition table or the HPA, a corrected *copy* may simply
+  import with OpenZFS. Offer that as the quick path before a deep recovery.
+
 ## Environment notes (learned the hard way)
 
 * **Windows + Git Bash** rewrites arguments that start with `/` into Windows paths,
